@@ -65,20 +65,33 @@ cdmdpi_action_callback g_menuCallback = nullptr;
 cdmdpi_settings_callback g_formCallback = nullptr;
 int g_formOpened = 0;
 
+// Every pixel of the source has a value of its own (never 0, which is black), so a pixel that
+// moved can be told from any other.
 Frame makeSourceFrame(bool withHd, bool withZones)
 {
    Frame f;
    f.original.resize(kW * kH);
    f.sd.resize(kW * kH);
-   for (uint32_t i = 0; i < kW * kH; ++i)
-   {
-      f.original[i] = static_cast<uint8_t>(1 + i % 3); // no black pixel at all
-      f.sd[i] = 0xFFFF;
-   }
+   for (uint32_t y = 0; y < kH; ++y)
+      for (uint32_t x = 0; x < kW; ++x)
+      {
+         const size_t i = static_cast<size_t>(y) * kW + x;
+         f.original[i] = static_cast<uint8_t>(1 + (x + 2 * y) % 3);
+         f.sd[i] = static_cast<uint16_t>(1 + i);
+      }
    if (withHd)
-      f.hd.assign(kHdW * kHdH, 0xFFFF);
+   {
+      f.hd.resize(kHdW * kHdH);
+      for (size_t i = 0; i < f.hd.size(); ++i)
+         f.hd[i] = static_cast<uint16_t>(1 + i);
+   }
    if (withZones)
-      f.zones.assign(kW * kH, 0); // every pixel in dynamic set 0
+   {
+      f.zones.resize(kW * kH);
+      for (uint32_t y = 0; y < kH; ++y)
+         for (uint32_t x = 0; x < kW; ++x)
+            f.zones[static_cast<size_t>(y) * kW + x] = static_cast<uint8_t>(x % 4);
+   }
    return f;
 }
 
@@ -251,12 +264,16 @@ int MSGPIAPI fShowForm(uint32_t, const char*, const char*, const ColorizingDMDSe
 {
    ++g_formOpened;
    g_formCallback = cb;
-   // As the editor does: the form's fields must make sense.
+   // As the editor does: the form's fields must make sense, and every transition is offered.
    bool hasChoice = false, hasText = false;
    for (uint32_t i = 0; i < count; ++i)
    {
-      if (fields[i].kind == CDMDPI_FIELD_CHOICE && std::strstr(fields[i].choices, "dissolve=Dissolve"))
+      if (fields[i].kind == CDMDPI_FIELD_CHOICE)
+      {
          hasChoice = true;
+         for (const auto& t : transitions::kTransitions)
+            CHECK(std::strstr(fields[i].choices, (std::string(t.id) + "=" + t.label).c_str()));
+      }
       if (fields[i].kind == CDMDPI_FIELD_TEXT && fields[i].key && !std::strcmp(fields[i].key, "frames"))
          hasText = true;
    }
@@ -348,7 +365,27 @@ size_t countBlack(const std::vector<uint8_t>& v)
    return n;
 }
 
-// ---- The tests ------------------------------------------------------------------------------
+const transitions::Transition& transitionById(const std::string& id)
+{
+   for (const auto& t : transitions::kTransitions)
+      if (id == t.id)
+         return t;
+   std::printf("no transition %s\n", id.c_str());
+   std::abort();
+}
+
+// How many pixels of a width x height picture the transition shows at this step.
+size_t visibleCount(const transitions::Transition& t, uint32_t step, uint32_t steps, uint32_t w,
+                    uint32_t h)
+{
+   size_t n = 0;
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+         n += t.map(x, y, step, steps, w, h).visible ? 1 : 0;
+   return n;
+}
+
+// ---- The tests of the transitions themselves ------------------------------------------------
 
 void testBayerIsAPermutation()
 {
@@ -360,90 +397,182 @@ void testBayerIsAPermutation()
       CHECK(count == 1);
 }
 
-void testDissolveShape()
+// What every transition has to do, on several frame sizes and step counts.
+void testEveryTransition()
 {
-   for (uint32_t steps : {1u, 2u, 7u, 10u, 100u, 256u})
-   {
-      size_t previous = 0;
-      for (uint32_t step = 1; step <= steps; ++step)
-      {
-         size_t black = 0;
-         for (uint32_t y = 0; y < 16; ++y)
-            for (uint32_t x = 0; x < 16; ++x)
-               black += transitions::dissolveIsBlack(x, y, step, steps, 16, 16);
-         CHECK(black >= previous); // never fewer black pixels than the step before
-         previous = black;
-      }
-      CHECK(previous == 256); // the last step is completely black
-   }
+   const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}, {129, 33}, {16, 16}};
+   for (const auto& t : transitions::kTransitions)
+      for (const auto& size : sizes)
+         for (uint32_t steps : {1u, 2u, 7u, 16u, 100u, 256u})
+         {
+            const uint32_t w = size[0], h = size[1];
+            const size_t total = static_cast<size_t>(w) * h;
+            size_t previous = total;
+            for (uint32_t step = 1; step <= steps; ++step)
+            {
+               const size_t visible = visibleCount(t, step, steps, w, h);
+               CHECK(visible <= previous); // the picture only loses
+               previous = visible;
+               for (uint32_t y = 0; y < h; ++y)
+                  for (uint32_t x = 0; x < w; ++x)
+                  {
+                     const auto from = t.map(x, y, step, steps, w, h);
+                     if (from.visible)
+                        CHECK(from.x < w && from.y < h); // it shows a pixel of the frame
+                  }
+            }
+            // The last step is not completely black, and it is not the picture itself.
+            CHECK(previous > 0);
+            CHECK(previous < total);
+         }
+}
+
+void testDissolveKeepsOnePixelIn256()
+{
+   const auto& t = transitionById("dissolve");
+   CHECK(visibleCount(t, 16, 16, 128, 32) == 128 * 32 / 256);
    // A pixel that is black stays black.
    for (uint32_t y = 0; y < 16; ++y)
       for (uint32_t x = 0; x < 16; ++x)
-         for (uint32_t step = 1; step < 10; ++step)
-            if (transitions::dissolveIsBlack(x, y, step, 10, 16, 16))
-               CHECK(transitions::dissolveIsBlack(x, y, step + 1, 10, 16, 16));
+         for (uint32_t step = 1; step < 16; ++step)
+            if (!t.map(x, y, step, 16, 128, 32).visible)
+               CHECK(!t.map(x, y, step + 1, 16, 128, 32).visible);
+   // A pixel that is shown is the pixel in the same place.
+   const auto from = t.map(5, 9, 3, 16, 128, 32);
+   CHECK(!from.visible || (from.x == 5 && from.y == 9));
 }
 
-void testDissolveCreatesFrames(bool withHd, bool withZones)
+void testSplitVertical()
 {
+   const auto& t = transitions::kTransitions[1];
+   CHECK(std::string(t.id) == "split_vertical");
+   // 16 steps on 128x32: the last step shows two columns at each edge (1/32 of a half), all rows.
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         const auto from = t.map(x, y, 16, 16, 128, 32);
+         const bool edge = x < 2 || x >= 126;
+         CHECK(from.visible == edge);
+         if (from.visible)
+         {
+            CHECK(from.y == y);
+            // The strips are the middle of each half: columns 62, 63 and 64, 65.
+            CHECK(from.x == (x < 2 ? 62 + x : 64 + (x - 126)));
+         }
+      }
+   // Halfway (step 8): both halves moved by half of the travel (62 / 2 = 31 pixels).
+   for (uint32_t x = 0; x < 128; ++x)
+   {
+      const auto from = t.map(x, 3, 8, 16, 128, 32);
+      if (x < 64 - 31)
+         CHECK(from.visible && from.x == x + 31);
+      else if (x >= 64 + 31)
+         CHECK(from.visible && from.x == x - 31);
+      else
+         CHECK(!from.visible); // the gap in the middle is black
+   }
+}
+
+void testSplitHorizontal()
+{
+   const auto& t = transitions::kTransitions[2];
+   CHECK(std::string(t.id) == "split_horizontal");
+   // 16 steps on 128x32: the last step shows the top and the bottom row, all columns.
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         const auto from = t.map(x, y, 16, 16, 128, 32);
+         const bool edge = y < 1 || y >= 31;
+         CHECK(from.visible == edge);
+         if (from.visible)
+         {
+            CHECK(from.x == x);
+            CHECK(from.y == (y < 1 ? 15 : 16)); // the middle rows of each half
+         }
+      }
+   // Halfway: the halves moved by 7 or 8 pixels ((16 - 1) * 8 / 16 rounded = 8).
+   for (uint32_t y = 0; y < 32; ++y)
+   {
+      const auto from = t.map(7, y, 8, 16, 128, 32);
+      if (y < 16 - 8)
+         CHECK(from.visible && from.y == y + 8);
+      else if (y >= 16 + 8)
+         CHECK(from.visible && from.y == y - 8);
+      else
+         CHECK(!from.visible);
+   }
+}
+
+// ---- The tests of the plugin ----------------------------------------------------------------
+
+// The plugin makes `steps` frames of a transition. The expected pictures are worked out here
+// from the transition's own answers ("where does this pixel come from"), pixel by pixel.
+void testTransitionFrames(const char* id, uint32_t steps, bool withHd, bool withZones)
+{
+   const auto& t = transitionById(id);
    resetProject(withHd, withZones);
    g_frames[0].comparisonMask = 5; // the source has a comparison mask and the shape mode
    g_frames[0].shapeMode = 1;
-   runForm("dissolve", "10");
+   const Frame source = g_frames[0];
+   runForm(id, std::to_string(steps).c_str());
 
    CHECK(g_messages.empty());
-   CHECK(g_frames.size() == 2 + 10); // the new frames go behind the last one
-   CHECK(g_endEditApplied == 1);     // one step of the history
+   CHECK(g_frames.size() == 2 + steps); // the new frames go behind the last one
+   CHECK(g_endEditApplied == 1);        // one step of the history
    CHECK(g_status.size() == 1);
-   CHECK(g_shown.size() == 10 && g_shown.front() == 2 && g_shown.back() == 11);
+   CHECK(g_shown.size() == steps && g_shown.front() == 2 && g_shown.back() == 1 + steps);
+   if (g_frames.size() != 2 + steps)
+      return;
 
    // The source frame is untouched.
-   CHECK(countBlack(g_frames[0].original) == 0);
+   CHECK(g_frames[0].original == source.original && g_frames[0].sd == source.sd &&
+         g_frames[0].hd == source.hd && g_frames[0].zones == source.zones);
    CHECK(g_frames[0].comparisonMask == 5 && g_frames[0].shapeMode == 1);
-   // The new frames have no comparison mask; the shape mode is the source's.
-   for (uint32_t f = 2; f < g_frames.size(); ++f)
-   {
-      CHECK(g_frames[f].comparisonMask == CDMDPI_NONE);
-      CHECK(g_frames[f].shapeMode == 1);
-   }
 
-   size_t previousBlack = 0;
-   for (uint32_t k = 1; k <= 10; ++k)
+   for (uint32_t step = 1; step <= steps; ++step)
    {
-      const Frame& f = g_frames[1 + k]; // frame 2 is step 1
-      const size_t black = countBlack(f.original);
-      CHECK(black > previousBlack || k == 10);
-      CHECK(black >= previousBlack);
-      previousBlack = black;
+      const Frame& f = g_frames[1 + step];
 
-      // Black in the original, in the SD plane, in the HD plane and out of the zones are the
-      // same pixels, and the other pixels are as in the source.
+      // No comparison mask; the shape mode is the source's.
+      CHECK(f.comparisonMask == CDMDPI_NONE);
+      CHECK(f.shapeMode == 1);
+      CHECK(f.hd.empty() == !withHd);
+      CHECK(f.zones.empty() == !withZones);
+
       for (uint32_t y = 0; y < kH; ++y)
          for (uint32_t x = 0; x < kW; ++x)
          {
             const size_t i = static_cast<size_t>(y) * kW + x;
-            const bool black = f.original[i] == 0;
-            CHECK((f.sd[i] == 0) == black);
-            if (!black)
-            {
-               CHECK(f.original[i] == g_frames[0].original[i]);
-               CHECK(f.sd[i] == 0xFFFF);
-            }
+            const auto from = t.map(x, y, step, steps, kW, kH);
+            const size_t s = static_cast<size_t>(from.y) * kW + from.x;
+            CHECK(f.original[i] == (from.visible ? source.original[s] : 0));
+            CHECK(f.sd[i] == (from.visible ? source.sd[s] : 0));
             if (withZones)
-               CHECK((f.zones[i] == 255) == black);
+               CHECK(f.zones[i] == (from.visible ? source.zones[s] : 255));
             if (withHd)
                for (uint32_t dy = 0; dy < 2; ++dy)
                   for (uint32_t dx = 0; dx < 2; ++dx)
-                     CHECK((f.hd[static_cast<size_t>(2 * y + dy) * kHdW + 2 * x + dx] == 0) ==
-                           black);
+                  {
+                     const size_t hi = static_cast<size_t>(2 * y + dy) * kHdW + 2 * x + dx;
+                     const size_t hs = static_cast<size_t>(2 * from.y + dy) * kHdW + 2 * from.x + dx;
+                     CHECK(f.hd[hi] == (from.visible ? source.hd[hs] : 0));
+                  }
          }
-      CHECK(f.hd.empty() == !withHd);
    }
-   // Step 1 of 10 dissolves a tenth of the picture, the last step all of it.
-   const size_t total = kW * kH;
-   const size_t first = countBlack(g_frames[2].original);
-   CHECK(first > total * 8 / 100 && first < total * 12 / 100);
-   CHECK(countBlack(g_frames[11].original) == total);
+
+   // The last frame is not completely black.
+   CHECK(countBlack(g_frames[1 + steps].original) < static_cast<size_t>(kW) * kH);
+}
+
+void testDissolveLastFrame()
+{
+   resetProject(true, true);
+   runForm("dissolve", "16");
+   CHECK(g_frames.size() == 18);
+   // One pixel in 256 is left: 16 of the 4096 pixels.
+   const size_t total = static_cast<size_t>(kW) * kH;
+   CHECK(countBlack(g_frames[17].original) == total - total / 256);
+   CHECK(countBlack(g_frames[16].original) < countBlack(g_frames[17].original));
 }
 
 void testBadInputsChangeNothing()
@@ -473,13 +602,16 @@ void testCancelChangesNothing()
 
 void testRefusalRollsBack()
 {
-   resetProject(true, true);
-   g_addFrameLimit = 4; // the editor refuses the fifth frame
-   runForm("dissolve", "10");
-   CHECK(g_frames.size() == 2); // the four frames made so far were taken back
-   CHECK(g_endEditApplied == 0);
-   CHECK(g_messages.size() == 1);
-   CHECK(!g_inBatch);
+   for (const char* id : {"dissolve", "split_vertical", "split_horizontal"})
+   {
+      resetProject(true, true);
+      g_addFrameLimit = 4; // the editor refuses the fifth frame
+      runForm(id, "10");
+      CHECK(g_frames.size() == 2); // the four frames made so far were taken back
+      CHECK(g_endEditApplied == 0);
+      CHECK(g_messages.size() == 1);
+      CHECK(!g_inBatch);
+   }
 }
 
 void testProjectChangedWhileFormIsOpen()
@@ -522,10 +654,18 @@ int main()
    CHECK(g_menuCallback != nullptr);
 
    testBayerIsAPermutation();
-   testDissolveShape();
-   testDissolveCreatesFrames(true, true);
-   testDissolveCreatesFrames(false, false);
-   testDissolveCreatesFrames(true, false);
+   testEveryTransition();
+   testDissolveKeepsOnePixelIn256();
+   testSplitVertical();
+   testSplitHorizontal();
+
+   for (const char* id : {"dissolve", "split_vertical", "split_horizontal"})
+   {
+      testTransitionFrames(id, 10, true, true);
+      testTransitionFrames(id, 16, false, false);
+      testTransitionFrames(id, 1, true, false);
+   }
+   testDissolveLastFrame();
    testBadInputsChangeNothing();
    testCancelChangesNothing();
    testRefusalRollsBack();
