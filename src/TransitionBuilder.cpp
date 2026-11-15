@@ -182,6 +182,12 @@ std::string createTransition(uint32_t source, const transitions::Transition& tra
                      std::to_string(steps) + ". Nothing was changed.");
       created.push_back(newFrame);
 
+      // No comparison mask on the new frames (the source's mask came along with the copy). The
+      // shape mode stays as it is.
+      if (!g_editor->SetFrameComparison(g_endpoint, newFrame, CDMDPI_NONE, frameInfo.shapeMode))
+         return fail("The editor refused to clear the comparison mask of frame " +
+                     std::to_string(step) + ". Nothing was changed.");
+
       // The colorized planes: a pixel of the plane follows the original pixel under it, so the
       // pattern is the same on the SD and the HD plane.
       for (const Plane& plane : planes)
