@@ -43,6 +43,8 @@ struct Frame
    std::vector<uint16_t> hd; // empty: no HD
    std::vector<uint8_t> zones;
    uint32_t background = CDMDPI_NONE;
+   uint32_t comparisonMask = CDMDPI_NONE;
+   uint32_t shapeMode = 0;
 };
 
 std::vector<Frame> g_frames;
@@ -103,7 +105,8 @@ int MSGPIAPI fGetFrameInfo(uint32_t frame, ColorizingDMDFrameInfo* info)
    if (frame >= g_frames.size())
       return 0;
    std::memset(info, 0, sizeof(*info));
-   info->comparisonMask = CDMDPI_NONE;
+   info->comparisonMask = g_frames[frame].comparisonMask;
+   info->shapeMode = g_frames[frame].shapeMode;
    info->background = g_frames[frame].background;
    info->hasDynamicPixels = g_frames[frame].zones.empty() ? 0 : 1;
    info->hasHd = g_frames[frame].hd.empty() ? 0 : 1;
@@ -226,6 +229,15 @@ int MSGPIAPI fSetFramePicture(uint32_t, uint32_t frame, int hd, const uint16_t* 
    return 1;
 }
 
+int MSGPIAPI fSetFrameComparison(uint32_t, uint32_t frame, uint32_t mask, uint32_t shapeMode)
+{
+   if (!g_inBatch || frame >= g_frames.size())
+      return 0;
+   g_frames[frame].comparisonMask = mask;
+   g_frames[frame].shapeMode = shapeMode;
+   return 1;
+}
+
 int MSGPIAPI fSetDynamicZones(uint32_t, uint32_t frame, const uint8_t* sets, uint32_t count)
 {
    if (!g_inBatch || frame >= g_frames.size() || count != g_frames[frame].zones.size())
@@ -287,6 +299,7 @@ void setUpApi()
    g_api.AddFrame = fAddFrame;
    g_api.SetFramePicture = fSetFramePicture;
    g_api.SetDynamicZones = fSetDynamicZones;
+   g_api.SetFrameComparison = fSetFrameComparison;
    g_api.ShowForm = fShowForm;
    g_bus.version = 1;
    g_bus.GetMsgID = bGetMsgID;
@@ -374,6 +387,8 @@ void testDissolveShape()
 void testDissolveCreatesFrames(bool withHd, bool withZones)
 {
    resetProject(withHd, withZones);
+   g_frames[0].comparisonMask = 5; // the source has a comparison mask and the shape mode
+   g_frames[0].shapeMode = 1;
    runForm("dissolve", "10");
 
    CHECK(g_messages.empty());
@@ -384,6 +399,13 @@ void testDissolveCreatesFrames(bool withHd, bool withZones)
 
    // The source frame is untouched.
    CHECK(countBlack(g_frames[0].original) == 0);
+   CHECK(g_frames[0].comparisonMask == 5 && g_frames[0].shapeMode == 1);
+   // The new frames have no comparison mask; the shape mode is the source's.
+   for (uint32_t f = 2; f < g_frames.size(); ++f)
+   {
+      CHECK(g_frames[f].comparisonMask == CDMDPI_NONE);
+      CHECK(g_frames[f].shapeMode == 1);
+   }
 
    size_t previousBlack = 0;
    for (uint32_t k = 1; k <= 10; ++k)
