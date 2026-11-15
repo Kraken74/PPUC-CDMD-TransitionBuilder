@@ -181,6 +181,15 @@ std::string createTransition(uint32_t source, const transitions::Transition& tra
          },
          zones, zonesWidth, zonesHeight);
 
+   // Every frame of the transition must differ from the others, so a frame of this size allows
+   // only so many frames.
+   const uint32_t most = transition.maxSteps(originalWidth, originalHeight);
+   if (steps > most)
+      return std::string(transition.label) + " can make at most " + std::to_string(most) +
+             " different frames on a frame of " + std::to_string(originalWidth) + " x " +
+             std::to_string(originalHeight) + " pixels; more would repeat a picture. Please "
+             "choose " + std::to_string(most) + " or fewer. Nothing was changed.";
+
    if (frameInfo.background != CDMDPI_NONE)
    {
       hadCaveat = true;
@@ -335,7 +344,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       {kSettingTransition, "Transition", CDMDPI_FIELD_CHOICE,
        transitions::kTransitions[0].id, choices.c_str(), nullptr},
       {kSettingFrames, "Number of frames", CDMDPI_FIELD_TEXT, "10", nullptr,
-       "How many new frames the transition lasts (1 to 256)."},
+       "How many new frames the transition lasts (1 to 255; some transitions allow fewer on small frames)."},
    };
    if (!g_editor->ShowForm(g_endpoint, "Transition Builder", "Apply", fields,
                            static_cast<uint32_t>(sizeof(fields) / sizeof(fields[0])),
