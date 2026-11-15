@@ -23,9 +23,10 @@
 
 namespace transitions {
 
-// The most frames one transition may create. The dissolve has 256 levels, so more frames than
-// this would only repeat pictures.
-inline constexpr uint32_t kMaxSteps = 256;
+// The most frames any transition may create. Every frame of a transition must differ from the
+// others, so each transition also has a maximum of its own for the size of the frame
+// (Transition::maxSteps).
+inline constexpr uint32_t kMaxSteps = 255;
 
 struct SourcePixel
 {
@@ -69,15 +70,20 @@ inline SourcePixel dissolveMap(uint32_t x, uint32_t y, uint32_t step, uint32_t s
 
 // ---- Split ----------------------------------------------------------------------------------
 
-// How far each half has moved apart at this step, in pixels along an axis `extent` long. It
-// grows from 0 to the distance at which only a thin strip of each half is still on screen
-// (1/32 of the half, at least one pixel).
-inline uint32_t splitShift(uint32_t extent, uint32_t step, uint32_t steps)
+// How far each half moves apart in all, in pixels along an axis `extent` long: until only a
+// thin strip of each half is still on screen (1/32 of the half, at least one pixel).
+inline uint32_t splitTravel(uint32_t extent)
 {
    const uint32_t half = extent / 2u;
    const uint32_t tail = std::max(1u, half / 32u);
-   const uint32_t travel = half > tail ? half - tail : 0u;
-   return (travel * step + steps / 2u) / steps;
+   return half > tail ? half - tail : 0u;
+}
+
+// How far each half has moved apart at this step. The halves move whole pixels, so there are
+// only splitTravel different frames: more steps than that would repeat a picture.
+inline uint32_t splitShift(uint32_t extent, uint32_t step, uint32_t steps)
+{
+   return (splitTravel(extent) * step + steps / 2u) / steps;
 }
 
 // One axis of a split. The first half moves toward 0 and the second half toward the end by
@@ -122,17 +128,32 @@ inline SourcePixel splitHorizontalMap(uint32_t x, uint32_t y, uint32_t step, uin
 
 // ---- The list -------------------------------------------------------------------------------
 
+// The most steps that still give frames that all differ (from each other and from the starting
+// frame), for a frame of this size.
+using MaxStepsFunction = uint32_t (*)(uint32_t width, uint32_t height);
+
+inline uint32_t dissolveMaxSteps(uint32_t, uint32_t) { return 255; } // 255 dither levels
+inline uint32_t splitVerticalMaxSteps(uint32_t width, uint32_t)
+{
+   return std::max(1u, splitTravel(width));
+}
+inline uint32_t splitHorizontalMaxSteps(uint32_t, uint32_t height)
+{
+   return std::max(1u, splitTravel(height));
+}
+
 struct Transition
 {
    const char* id;    // kept in the plugin's settings
    const char* label; // shown in the drop-down list
    MapFunction map;
+   MaxStepsFunction maxSteps;
 };
 
 inline constexpr Transition kTransitions[] = {
-   {"dissolve", "Dissolve", &dissolveMap},
-   {"split_vertical", "Split Vertical", &splitVerticalMap},
-   {"split_horizontal", "Split Horizontal", &splitHorizontalMap},
+   {"dissolve", "Dissolve", &dissolveMap, &dissolveMaxSteps},
+   {"split_vertical", "Split Vertical", &splitVerticalMap, &splitVerticalMaxSteps},
+   {"split_horizontal", "Split Horizontal", &splitHorizontalMap, &splitHorizontalMaxSteps},
 };
 inline constexpr std::size_t kTransitionCount = sizeof(kTransitions) / sizeof(kTransitions[0]);
 
