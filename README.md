@@ -43,6 +43,13 @@ GitHub builds it for you:
 4. When the run is green, open it and download `TransitionBuilder-windows-x64` under
    `Artifacts`. Unpack it: it holds the `TransitionBuilder` folder from the steps above.
 
+The new frames have **no comparison mask** (the mask of the frame you started from is not
+copied; its shape mode is). They keep the frame's display time.
+
+To change the display time of the new frames, use the editor's `Duration` field in the Frame
+section: the plugin leaves the new frames selected, and `Duration` applies to all selected
+frames. (The editor's plugin API cannot set a frame's duration, so the plugin has no box for it.)
+
 ## What it does not do (yet)
 
 - It starts from the **current frame** only, not from several selected frames.
