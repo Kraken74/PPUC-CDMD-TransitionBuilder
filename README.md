@@ -20,6 +20,12 @@ at least one pixel wide).
 3. Pick the transition from the list and type how many frames it should last (1 to 256).
 4. Click `Apply` (or `Cancel`).
 
+Every frame of a transition has to differ from the others, so each transition has a maximum
+number of frames for the size of your frame. If you ask for more, the plugin tells you the
+maximum and changes nothing. On a 128 x 32 frame: **Dissolve** 255, **Split Vertical** 62,
+**Split Horizontal** 15 (the halves move whole pixels, and a frame 32 pixels tall only has 15
+positions to move through). A taller or wider frame allows more.
+
 The plugin adds that many new frames **at the end of the project**. Each new frame is a copy of
 the frame you started from, one step further along the transition than the one before. The new
 frames are selected afterwards, so you can use them right away (for example to
