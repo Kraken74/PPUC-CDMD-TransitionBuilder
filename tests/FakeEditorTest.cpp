@@ -6,8 +6,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -365,12 +367,12 @@ size_t countBlack(const std::vector<uint8_t>& v)
    return n;
 }
 
-const transitions::Transition& transitionById(const std::string& id)
+const transitions::Transition& transitionById(const char* id)
 {
    for (const auto& t : transitions::kTransitions)
-      if (id == t.id)
+      if (std::strcmp(id, t.id) == 0)
          return t;
-   std::printf("no transition %s\n", id.c_str());
+   std::printf("no transition %s\n", id);
    std::abort();
 }
 
@@ -425,6 +427,51 @@ void testEveryTransition()
             CHECK(previous > 0);
             CHECK(previous < total);
          }
+}
+
+// A frame of the picture a transition makes at one step, as every pixel's source (0: black).
+std::vector<uint32_t> signatureOf(const transitions::Transition& t, uint32_t step, uint32_t steps,
+                                  uint32_t w, uint32_t h)
+{
+   std::vector<uint32_t> signature;
+   signature.reserve(static_cast<size_t>(w) * h);
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+      {
+         if (step == 0) // the starting frame itself
+            signature.push_back(y * w + x + 1);
+         else
+         {
+            const auto from = t.map(x, y, step, steps, w, h);
+            signature.push_back(from.visible ? from.y * w + from.x + 1 : 0);
+         }
+      }
+   return signature;
+}
+
+// Up to the transition's own maximum, no frame is the same as another or as the starting frame.
+void testNoRepeatedFramesUpToTheMaximum()
+{
+   const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}, {128, 16}, {129, 33}};
+   for (const auto& t : transitions::kTransitions)
+      for (const auto& size : sizes)
+      {
+         const uint32_t w = size[0], h = size[1];
+         const uint32_t most = t.maxSteps(w, h);
+         CHECK(most >= 1 && most <= transitions::kMaxSteps);
+         for (uint32_t steps : {1u, 2u, most / 2 + 1, most - 1, most})
+         {
+            if (steps < 1 || steps > most)
+               continue;
+            std::set<std::vector<uint32_t>> seen;
+            for (uint32_t step = 0; step <= steps; ++step)
+               CHECK(seen.insert(signatureOf(t, step, steps, w, h)).second);
+         }
+      }
+   // The limits that follow from the frame size: 15 for the 32 rows, 62 for the 128 columns.
+   CHECK(transitionById("split_horizontal").maxSteps(128, 32) == 15);
+   CHECK(transitionById("split_vertical").maxSteps(128, 32) == 62);
+   CHECK(transitionById("dissolve").maxSteps(128, 32) == 255);
 }
 
 void testDissolveKeepsOnePixelIn256()
@@ -575,9 +622,41 @@ void testDissolveLastFrame()
    CHECK(countBlack(g_frames[16].original) < countBlack(g_frames[17].original));
 }
 
+// A transition makes at most as many frames as it has different pictures; more is refused, and
+// at the maximum every new frame differs from the others and from the starting frame.
+void testMaximumNumberOfFrames()
+{
+   for (const auto& t : transitions::kTransitions)
+   {
+      const uint32_t most = t.maxSteps(kW, kH);
+
+      resetProject(true, true);
+      runForm(t.id, std::to_string(most).c_str());
+      CHECK(g_messages.empty());
+      CHECK(g_frames.size() == 2 + most);
+      if (g_frames.size() == 2 + most)
+      {
+         std::set<std::vector<uint16_t>> seen;
+         for (const Frame& f : g_frames)
+            if (&f != &g_frames[1]) // frame 1 is another copy of the source
+               CHECK(seen.insert(f.sd).second);
+      }
+
+      if (most < transitions::kMaxSteps) // one more would repeat a picture
+      {
+         resetProject(true, true);
+         runForm(t.id, std::to_string(most + 1).c_str());
+         CHECK(g_messages.size() == 1);
+         CHECK(g_messages[0].find(std::to_string(most)) != std::string::npos);
+         CHECK(g_frames.size() == 2); // nothing was added
+         CHECK(g_endEditCalls == 0);
+      }
+   }
+}
+
 void testBadInputsChangeNothing()
 {
-   for (const char* frames : {"abc", "", "0", "-3", "257", "10x", "1.5"})
+   for (const char* frames : {"abc", "", "0", "-3", "256", "257", "10x", "1.5"})
    {
       resetProject(true, true);
       runForm("dissolve", frames);
@@ -655,6 +734,7 @@ int main()
 
    testBayerIsAPermutation();
    testEveryTransition();
+   testNoRepeatedFramesUpToTheMaximum();
    testDissolveKeepsOnePixelIn256();
    testSplitVertical();
    testSplitHorizontal();
@@ -662,10 +742,11 @@ int main()
    for (const char* id : {"dissolve", "split_vertical", "split_horizontal"})
    {
       testTransitionFrames(id, 10, true, true);
-      testTransitionFrames(id, 16, false, false);
+      testTransitionFrames(id, 15, false, false);
       testTransitionFrames(id, 1, true, false);
    }
    testDissolveLastFrame();
+   testMaximumNumberOfFrames();
    testBadInputsChangeNothing();
    testCancelChangesNothing();
    testRefusalRollsBack();
