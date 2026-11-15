@@ -3,9 +3,9 @@
 // Transition Builder: a plugin for the PPUC Colorizing DMD editor.
 //
 // Plugins menu -> "Transition Builder...": the author picks a transition and a number of frames
-// for the current frame. The plugin appends that many new frames at the end of the project. Each
-// is a copy of the current frame with more of the picture turned black than the one before; the
-// last one is completely black. All of it is one step of the editor's history (one Undo).
+// for the current frame. The plugin appends that many new frames at the end of the project, each
+// a step further along the transition than the one before. The last one is not completely black.
+// All of it is one step of the editor's history (one Undo).
 
 #include <algorithm>
 #include <cstdint>
@@ -82,6 +82,43 @@ std::string setting(const char* key, const char* fallback)
    return buffer;
 }
 
+// Makes the picture of one step: `source` is a picture of width x height pixels (the original
+// frame, a colorized plane or the dynamic zones). The transition decides on the original
+// frame's grid (originalWidth x originalHeight) where each pixel comes from. A picture on a
+// finer grid (the HD plane is twice as large) follows the same decision, and a pixel keeps its
+// place inside its cell, so a move is as smooth as the picture is fine. Pixels that show
+// nothing get `black`.
+template <class T>
+void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t width,
+                uint32_t height, uint32_t originalWidth, uint32_t originalHeight,
+                const transitions::Transition& transition, uint32_t step, uint32_t steps, T black)
+{
+   out.assign(source.size(), black);
+   for (uint32_t y = 0; y < height; ++y)
+      for (uint32_t x = 0; x < width; ++x)
+      {
+         const uint32_t cellX = static_cast<uint32_t>(static_cast<uint64_t>(x) * originalWidth / width);
+         const uint32_t cellY =
+            static_cast<uint32_t>(static_cast<uint64_t>(y) * originalHeight / height);
+         const transitions::SourcePixel from =
+            transition.map(cellX, cellY, step, steps, originalWidth, originalHeight);
+         if (!from.visible)
+            continue;
+         // The pixel's place inside its cell, then the same place in the source cell.
+         const uint32_t insideX =
+            x - static_cast<uint32_t>(static_cast<uint64_t>(cellX) * width / originalWidth);
+         const uint32_t insideY =
+            y - static_cast<uint32_t>(static_cast<uint64_t>(cellY) * height / originalHeight);
+         const uint32_t sourceX = std::min(
+            width - 1,
+            static_cast<uint32_t>(static_cast<uint64_t>(from.x) * width / originalWidth) + insideX);
+         const uint32_t sourceY = std::min(
+            height - 1,
+            static_cast<uint32_t>(static_cast<uint64_t>(from.y) * height / originalHeight) + insideY);
+         out[static_cast<size_t>(y) * width + x] = source[static_cast<size_t>(sourceY) * width + sourceX];
+      }
+}
+
 // A plane of the colorized frame: its pixels, and the size of the grid they lie on.
 struct Plane
 {
@@ -148,7 +185,7 @@ std::string createTransition(uint32_t source, const transitions::Transition& tra
    {
       hadCaveat = true;
       caveat += "The frame shows a background. Where the background shows through, the "
-                "pixels do not dissolve; only the frame's own pixels do.\n";
+                "pixels stay as they are; only the frame's own pixels dissolve or move.\n";
    }
 
    if (!g_editor->BeginEdit(g_endpoint, kUndoName))
@@ -167,11 +204,8 @@ std::string createTransition(uint32_t source, const transitions::Transition& tra
    for (uint32_t step = 1; step <= steps; ++step)
    {
       // The original: black pixels are shade 0, so every new frame differs from the others.
-      stepOriginal = original;
-      for (uint32_t y = 0; y < originalHeight; ++y)
-         for (uint32_t x = 0; x < originalWidth; ++x)
-            if (transition.isBlack(x, y, step, steps, originalWidth, originalHeight))
-               stepOriginal[static_cast<size_t>(y) * originalWidth + x] = 0;
+      renderStep<uint8_t>(original, stepOriginal, originalWidth, originalHeight, originalWidth,
+                          originalHeight, transition, step, steps, 0);
 
       // The new frame is made like the source: its settings and pictures come along.
       uint32_t newFrame = CDMDPI_NONE;
@@ -188,42 +222,23 @@ std::string createTransition(uint32_t source, const transitions::Transition& tra
          return fail("The editor refused to clear the comparison mask of frame " +
                      std::to_string(step) + ". Nothing was changed.");
 
-      // The colorized planes: a pixel of the plane follows the original pixel under it, so the
-      // pattern is the same on the SD and the HD plane.
+      // The colorized planes follow the same decisions as the original.
       for (const Plane& plane : planes)
       {
-         stepPixels = plane.pixels;
-         for (uint32_t y = 0; y < plane.height; ++y)
-            for (uint32_t x = 0; x < plane.width; ++x)
-            {
-               const uint32_t ox = static_cast<uint32_t>(
-                  static_cast<uint64_t>(x) * originalWidth / plane.width);
-               const uint32_t oy = static_cast<uint32_t>(
-                  static_cast<uint64_t>(y) * originalHeight / plane.height);
-               if (transition.isBlack(ox, oy, step, steps, originalWidth, originalHeight))
-                  stepPixels[static_cast<size_t>(y) * plane.width + x] = 0; // RGB565 black
-            }
+         renderStep<uint16_t>(plane.pixels, stepPixels, plane.width, plane.height, originalWidth,
+                              originalHeight, transition, step, steps, 0); // RGB565 black
          if (!g_editor->SetFramePicture(g_endpoint, newFrame, plane.hd, stepPixels.data(),
                                         nullptr, static_cast<uint32_t>(stepPixels.size())))
             return fail("The editor refused the picture of frame " + std::to_string(step) +
                         ". Nothing was changed.");
       }
 
-      // Dynamic zones color a pixel at run time from its shade, so a black pixel must not stay
-      // in a zone.
+      // Dynamic zones color a pixel at run time from its shade, so they move with the picture,
+      // and a black pixel must not stay in a zone.
       if (!zones.empty())
       {
-         stepZones = zones;
-         for (uint32_t y = 0; y < zonesHeight; ++y)
-            for (uint32_t x = 0; x < zonesWidth; ++x)
-            {
-               const uint32_t ox = static_cast<uint32_t>(
-                  static_cast<uint64_t>(x) * originalWidth / zonesWidth);
-               const uint32_t oy = static_cast<uint32_t>(
-                  static_cast<uint64_t>(y) * originalHeight / zonesHeight);
-               if (transition.isBlack(ox, oy, step, steps, originalWidth, originalHeight))
-                  stepZones[static_cast<size_t>(y) * zonesWidth + x] = 255;
-            }
+         renderStep<uint8_t>(zones, stepZones, zonesWidth, zonesHeight, originalWidth,
+                             originalHeight, transition, step, steps, 255);
          if (!g_editor->SetDynamicZones(g_endpoint, newFrame, stepZones.data(),
                                         static_cast<uint32_t>(stepZones.size())))
             return fail("The editor refused the dynamic zones of frame " +
