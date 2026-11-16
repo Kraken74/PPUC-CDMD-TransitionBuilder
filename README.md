@@ -1,36 +1,65 @@
 # Transition Builder
 
 A plugin for the PPUC Colorizing DMD editor (the Serum editor). It builds transitions for you on
-new frames at the end of your project. The transitions are:
+new frames at the end of your project.
 
-- **Dissolve**: the picture fades to black pixel by pixel, in a regular pattern.
-- **Split Vertical**: the picture is cut down the middle; the left half slides off to the left
-  and the right half slides off to the right.
-- **Split Horizontal**: the picture is cut across the middle; the top half slides up and the
-  bottom half slides down.
+![The transitions, halfway through: white is the picture, black is what the transition has taken away](docs/transitions.png)
 
-The last frame of a transition is never completely black. A dissolve ends with one pixel in 256
-still lit, and a split ends with thin strips of the picture at the two edges (1/32 of each half,
-at least one pixel wide).
+| Transition | Options | What it does |
+| --- | --- | --- |
+| **Dissolve** | Orderly, Random, Centre-Out, Edge-In, Spiral | Pixels turn black: in a regular pattern, at random, from the centre outward, from the edges inward, or along a spiral. |
+| **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
+| **Wipe** | Up, Down, Left, Right | A black bar wipes over the picture, moving in the direction you choose (Left: it comes in from the right edge). |
+| **Blinds** | Horizontal, Vertical | Black bars at regular intervals grow wider. |
+| **Fade** | To Black, To White | The picture gets darker (brighter) with every frame. |
+| **Alternating Slide** | Horizontal, Vertical | Horizontal: the 1st, 3rd, 5th ... row slide left, the 2nd, 4th ... row slide right. Vertical: the 1st, 3rd ... column go up, the 2nd, 4th ... column go down. |
+| **Split Vertical** | | Cut down the middle; the halves slide left and right. |
+| **Split Horizontal** | | Cut across the middle; the halves slide up and down. |
+
+The last frame of a transition is never completely black (or white): a dissolve ends with a few
+pixels still lit, the sliding ones with a thin strip of the picture, a fade with a color one
+step from black (white).
 
 ## How to use it
 
 1. Open your project and select the frame you want to start the transition from.
 2. Choose `Plugins -> Transition Builder...`.
-3. Pick the transition from the list and type how many frames it should last (1 to 256).
-4. Click `Apply` (or `Cancel`).
+3. **Window 1:** pick the transition and click `Next`.
+4. **Window 2** (all but the splits): pick the option (the direction, the dissolve type ...) and
+   click `Next`.
+5. **Window 3:** pick the number of frames and click `Apply`. The list holds only the numbers
+   that work for that transition on your frame (see below), so there is nothing to mistype.
 
-Every frame of a transition has to differ from the others, so each transition has a maximum
-number of frames for the size of your frame. If you ask for more, the plugin tells you the
-maximum and changes nothing. On a 128 x 32 frame: **Dissolve** 255, **Split Vertical** 62,
-**Split Horizontal** 15 (the halves move whole pixels, and a frame 32 pixels tall only has 15
-positions to move through). A taller or wider frame allows more.
+Every window has `Cancel`; nothing is changed until `Apply`.
+
+The editor's windows cannot change one field when another changes, which is why this is three
+short windows rather than one: what you can choose next depends on what you chose before.
+
+### Why the number of frames is limited
+
+Every frame of a transition has to differ from the others. A slide moves whole pixels, so a
+frame 32 pixels tall can only be in so many places; blinds can only grow as wide as the gap
+between them. Each transition therefore has a most for the size of your frame, and the list in
+window 3 stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Horizontal 15.
+Larger frames (192 x 64, 256 x 64) allow more. A fade is limited by how many brightness levels
+the picture has.
 
 The plugin adds that many new frames **at the end of the project**. Each new frame is a copy of
 the frame you started from, one step further along the transition than the one before. The new
-frames are selected afterwards, so you can use them right away (for example to
-make them a scene). It is all one step of the editor's history: **one `Undo` removes all the
-new frames.** The frame you started from is never changed.
+frames are selected afterwards, so you can use them right away. It is all one step of the
+editor's history: **one `Undo` removes all the new frames.** The frame you started from is never
+changed.
+
+The new frames have **no comparison mask** (the mask of the frame you started from is not
+copied; its shape mode is). They keep the frame's display time. To change it, use the editor's
+`Duration` field in the Frame section: the plugin leaves the new frames selected, and `Duration`
+applies to all selected frames. (The editor's plugin API cannot set a frame's duration.)
+
+### The pictures
+
+Windows 1 and 2 show small pictures of the transitions (white is the picture, black is what the
+transition has taken away). If they do not look right on your computer, remove the tick at
+`Show pictures of the transitions` in window 1.
 
 ## Installing it
 
@@ -67,30 +96,32 @@ frames. (The editor's plugin API cannot set a frame's duration, so the plugin ha
 
 ## What it does not do (yet)
 
-- It starts from the **current frame** only, not from several selected frames.
-- **Backgrounds:** where a frame shows its background, those pixels stay as they are (they
-  neither dissolve nor move), because the plugin API cannot change a frame's background mask. The plugin tells you when the frame
-  has a background.
-- Black pixels are black in the frame's original shades, in the SD and the HD picture, and they
-  are taken out of the dynamic zones (a dynamic zone would color them at run time). In a split,
-  the dynamic zones move with the picture.
-- The new frames are plain frames. Turning them into a scene (with a trigger) is done in the
-  editor as usual; the plugin API cannot create scenes.
+- It starts from the **current frame** only, and the transition always goes to black (or white).
+  Transitions from one frame to another are planned.
+- It works on the original frame and the one colorized picture; with an HD plane the plugin
+  moves it in 2x2 blocks, as the editor's HD plane works.
+- **Backgrounds:** where a frame shows its background, those pixels stay as they are, because the
+  plugin API cannot change a frame's background mask. The plugin tells you when the frame has one.
+- Black pixels are black in the frame's original shades and in the pictures, and they are taken
+  out of the dynamic zones. In moving transitions the dynamic zones move with the picture.
+- **Fade:** the colors of the picture and the frame's dynamic colors fade. Color rotations of the
+  new frames are removed (they would keep turning the colors at full brightness).
+- The new frames are plain frames. Turning them into a scene is done in the editor as usual.
 
 ## Adding another transition
 
-Everything about a transition is in `src/Transitions.h`. A transition is one function that
-answers, for a pixel (x, y) of the new frame at step N of M: which pixel of the starting frame
-does it show, or is it black? A dissolve shows the pixel in the same place or black; a split
-shows a pixel moved sideways. Write one (a wipe from the left, for instance, is black where
-`x < width * step / steps` and the same pixel elsewhere), add one line to the list
-`kTransitions`, and it appears in the drop-down list. Nothing else changes: the same answers
-are used for the original shades, the SD picture, the HD picture and the dynamic zones.
+Everything about a transition is in `src/Transitions.h`. A transition is a class (an `Effect`)
+that answers, for a pixel (x, y) of the new frame at step N of M: which pixel of the starting
+frame does it show, or is it black? It also says its most frames (`maxSteps`). Add one entry to
+`kTransitions` (with its options) and it appears in the windows. Nothing else changes: the same
+answers are used for the original shades, the pictures and the dynamic zones. The pictures in the
+windows are drawn from the effect itself (`src/Preview.h`).
 
 ## Files
 
 - `plugin.cfg`: what the editor reads to find the plugin.
-- `src/TransitionBuilder.cpp`: the plugin (menu entry, window, creating the frames).
+- `src/TransitionBuilder.cpp`: the plugin (menu entry, the three windows, creating the frames).
+- `src/Preview.h`: the small pictures of the transitions.
 - `src/Transitions.h`: the transitions.
 - `include/`: the editor's plugin API (`ColorizingDMDPlugin.h`, version 8, from
   PPUC-Colorizing-DMD) and the VPX plugin SDK header (`plugins/MsgPlugin.h`).
