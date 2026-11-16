@@ -419,9 +419,11 @@ void showFramesForm()
    const std::string note = what + ": from frame " + std::to_string(g_wizard.source.frame) + ", up to " +
                             std::to_string(most) + " different frames are possible (" +
                             g_wizard.effect->limitReason() + "). The new frames are added at the end of the project.";
+   // The form points into these strings, so they must live until ShowForm has returned.
+   const std::string startText = std::to_string(start);
    const ColorizingDMDSettingField fields[] = {
       {nullptr, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr},
-      {kSettingFrames, "Number of frames", CDMDPI_FIELD_CHOICE, std::to_string(start).c_str(), choices.c_str(), nullptr},
+      {kSettingFrames, "Number of frames", CDMDPI_FIELD_CHOICE, startText.c_str(), choices.c_str(), nullptr},
    };
    if (!g_editor->ShowForm(g_endpoint, what.c_str(), "Apply", fields, 2, onFramesChosen, nullptr))
       message(kTitle, "The window could not be opened. Close other plugin windows and try again.");
