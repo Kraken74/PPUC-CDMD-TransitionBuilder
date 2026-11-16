@@ -605,13 +605,11 @@ inline std::unique_ptr<Effect> makeAlternatingSlide(const char* option, const So
 {
    return std::make_unique<AlternatingSlide>(!same(option, "vertical"), s.width, s.height);
 }
-inline std::unique_ptr<Effect> makeSplitVertical(const char*, const SourceInfo& s)
+// Split: Vertical cuts down the middle (the halves move left and right), Horizontal cuts across
+// the middle (the halves move up and down).
+inline std::unique_ptr<Effect> makeSplit(const char* option, const SourceInfo& s)
 {
-   return std::make_unique<Split>(true, s.width, s.height);
-}
-inline std::unique_ptr<Effect> makeSplitHorizontal(const char*, const SourceInfo& s)
-{
-   return std::make_unique<Split>(false, s.width, s.height);
+   return std::make_unique<Split>(same(option, "vertical"), s.width, s.height);
 }
 
 inline const Option kDissolveOptions[] = {
@@ -631,45 +629,42 @@ inline const Option kFadeOptions[] = {
 #define TB_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
 inline const Transition kTransitions[] = {
+   {"alternating_slide", "Alternating Slide",
+    "Lines slide off in turns. Horizontal: the 1st, 3rd, 5th ... row slide left and the 2nd, "
+    "4th, 6th ... row slide right. Vertical: the 1st, 3rd, 5th ... column go up and the 2nd, "
+    "4th, 6th ... column go down. A thin strip of each line is left at the end.",
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide},
+   {"blinds", "Blinds",
+    "Black bars appear at regular intervals and grow wider until only thin slits of the "
+    "picture are left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by "
+    "side.",
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
    {"dissolve", "Dissolve",
     "The picture dissolves to black. Orderly: pixels disappear in a regular pattern. Random: "
     "pixels disappear at random. Centre-Out: they disappear from the centre outward. Edge-In: "
     "they disappear from the outside edges inward. Spiral: they disappear along a spiral from "
     "the top left corner.",
     "Dissolve Type", kDissolveOptions, TB_COUNT(kDissolveOptions), &makeDissolve},
-   {"slide", "Slide",
-    "The whole picture slides off the screen in the direction you choose. A thin strip of it "
-    "is left at the end.",
-    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide},
-   {"wipe", "Wipe",
-    "A black bar wipes over the picture in the direction you choose (Left: it comes in from "
-    "the right edge and moves left). A thin strip of the picture is left at the end.",
-    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeWipe},
-   {"blinds", "Blinds",
-    "Black bars appear at regular intervals and grow wider until only thin slits of the "
-    "picture are left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by "
-    "side.",
-    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
    {"fade", "Fade",
     "The picture gets darker or brighter at each step. The last frame is almost black (To "
     "Black) or almost white (To White), but not quite. Color rotations of the new frames are "
     "removed, because they would not fade.",
     "Fade To", kFadeOptions, TB_COUNT(kFadeOptions), &makeFade},
-   {"alternating_slide", "Alternating Slide",
-    "Lines slide off in turns. Horizontal: the 1st, 3rd, 5th ... row slide left and the 2nd, "
-    "4th, 6th ... row slide right. Vertical: the 1st, 3rd, 5th ... column go up and the 2nd, "
-    "4th, 6th ... column go down. A thin strip of each line is left at the end.",
-    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide},
-   {"split_vertical", "Split Vertical",
-    "The picture is cut down the middle. The left half slides to the left and the right half "
-    "to the right, until a thin strip of each is left at the edges.",
-    nullptr, nullptr, 0, &makeSplitVertical},
-   {"split_horizontal", "Split Horizontal",
-    "The picture is cut across the middle. The top half slides up and the bottom half down, "
-    "until a thin strip of each is left at the edges.",
-    nullptr, nullptr, 0, &makeSplitHorizontal},
+   {"slide", "Slide",
+    "The whole picture slides off the screen in the direction you choose. A thin strip of it "
+    "is left at the end.",
+    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide},
+   {"split", "Split",
+    "The picture is cut in the middle and the two halves slide apart, until a thin strip of "
+    "each is left at the edges. Horizontal: cut across, the top half slides up and the bottom "
+    "half down. Vertical: cut down, the left half slides left and the right half right.",
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
+   {"wipe", "Wipe",
+    "A black bar wipes over the picture in the direction you choose (Left: it comes in from "
+    "the right edge and moves left). A thin strip of the picture is left at the end.",
+    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeWipe},
 };
-inline constexpr size_t kTransitionCount = 8;
+inline constexpr size_t kTransitionCount = 7;
 static_assert(sizeof(kTransitions) / sizeof(kTransitions[0]) == kTransitionCount, "update kTransitionCount");
 
 #undef TB_COUNT

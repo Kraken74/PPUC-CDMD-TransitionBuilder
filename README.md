@@ -7,14 +7,13 @@ new frames at the end of your project.
 
 | Transition | Options | What it does |
 | --- | --- | --- |
-| **Dissolve** | Orderly, Random, Centre-Out, Edge-In, Spiral | Pixels turn black: in a regular pattern, at random, from the centre outward, from the edges inward, or along a spiral. |
-| **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
-| **Wipe** | Up, Down, Left, Right | A black bar wipes over the picture, moving in the direction you choose (Left: it comes in from the right edge). |
-| **Blinds** | Horizontal, Vertical | Black bars at regular intervals grow wider. |
-| **Fade** | To Black, To White | The picture gets darker (brighter) with every frame. |
 | **Alternating Slide** | Horizontal, Vertical | Horizontal: the 1st, 3rd, 5th ... row slide left, the 2nd, 4th ... row slide right. Vertical: the 1st, 3rd ... column go up, the 2nd, 4th ... column go down. |
-| **Split Vertical** | | Cut down the middle; the halves slide left and right. |
-| **Split Horizontal** | | Cut across the middle; the halves slide up and down. |
+| **Blinds** | Horizontal, Vertical | Black bars at regular intervals grow wider. |
+| **Dissolve** | Orderly, Random, Centre-Out, Edge-In, Spiral | Pixels turn black: in a regular pattern, at random, from the centre outward, from the edges inward, or along a spiral. |
+| **Fade** | To Black, To White | The picture gets darker (brighter) with every frame. |
+| **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
+| **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
+| **Wipe** | Up, Down, Left, Right | A black bar wipes over the picture, moving in the direction you choose (Left: it comes in from the right edge). |
 
 The last frame of a transition is never completely black (or white): a dissolve ends with a few
 pixels still lit, the sliding ones with a thin strip of the picture, a fade with a color one
@@ -25,10 +24,15 @@ step from black (white).
 1. Open your project and select the frame you want to start the transition from.
 2. Choose `Plugins -> Transition Builder...`.
 3. **Window 1:** pick the transition and click `Next`.
-4. **Window 2** (all but the splits): pick the option (the direction, the dissolve type ...) and
-   click `Next`.
-5. **Window 3:** pick the number of frames and click `Apply`. The list holds only the numbers
-   that work for that transition on your frame (see below), so there is nothing to mistype.
+4. **Window 2:** pick the option (the direction, the dissolve type ...) and click `Next`.
+5. **Window 3:** pick the number of frames, where to put them, and click `Apply`. The list of
+   numbers holds only those that work for that transition on your frame (see below), so there is
+   nothing to mistype. The new frames go **right after the starting frame** or **at the end of
+   the project**, as you choose.
+
+Windows 2 and 3 have a tick box, `Go back to the previous window`. Tick it and click the button
+to go back one window instead of on; your choices are kept. (The editor's windows have only one
+button besides `Cancel`, so a real `Back` button is not possible.)
 
 Every window has `Cancel`; nothing is changed until `Apply`.
 
@@ -44,9 +48,10 @@ window 3 stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Hori
 Larger frames (192 x 64, 256 x 64) allow more. A fade is limited by how many brightness levels
 the picture has.
 
-The plugin adds that many new frames **at the end of the project**. Each new frame is a copy of
+The plugin adds that many new frames. Each new frame is a copy of
 the frame you started from, one step further along the transition than the one before. The new
-frames are selected afterwards, so you can use them right away. It is all one step of the
+frames are selected afterwards, so you can use them right away. Placing them after the
+starting frame moves them as one block, so sections and the order of the project stay right. It is all one step of the
 editor's history: **one `Undo` removes all the new frames.** The frame you started from is never
 changed.
 

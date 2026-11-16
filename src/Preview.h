@@ -37,7 +37,7 @@ inline uint8_t grayOf(uint16_t c)
 }
 
 inline Icon makeIcon(const transitions::Transition& transition, const transitions::Option* option,
-                     uint32_t width = 16, uint32_t height = 4)
+                     uint32_t width = 16, uint32_t height = 6)
 {
    const bool fadeToWhite = transitions::same(transition.id, "fade") && option &&
                             transitions::same(option->id, "white");
@@ -150,7 +150,7 @@ struct GalleryItem
 // A paragraph of text and a table of labelled pictures, `columns` to a row. Starts with a tag,
 // which is what makes the label draw it as rich text.
 inline std::string galleryHtml(const std::string& text, const std::vector<GalleryItem>& items,
-                               size_t columns = 2)
+                               size_t columns = 4)
 {
    std::string html = "<p>" + escapeHtml(text) + "</p><table cellspacing=\"6\">";
    for (size_t i = 0; i < items.size(); ++i)

@@ -288,6 +288,38 @@ int MSGPIAPI fClearColorRotations(uint32_t, uint32_t frame)
    return 1;
 }
 
+bool g_refuseMove = false;
+int MSGPIAPI fMoveFrames(uint32_t, const uint32_t* frames, uint32_t count, uint32_t before)
+{
+   if (!g_inBatch || g_refuseMove || before > g_frames.size() || count == 0)
+      return 0;
+   std::vector<bool> moving(g_frames.size(), false);
+   for (uint32_t i = 0; i < count; ++i)
+   {
+      if (frames[i] >= g_frames.size())
+         return 0;
+      moving[frames[i]] = true;
+   }
+   std::vector<Frame> rest, block, result;
+   size_t insertAt = 0; // among the frames that stay: those numbered below `before`
+   for (size_t i = 0; i < g_frames.size(); ++i)
+   {
+      if (moving[i])
+         block.push_back(g_frames[i]);
+      else
+      {
+         if (i < before)
+            ++insertAt;
+         rest.push_back(g_frames[i]);
+      }
+   }
+   result.assign(rest.begin(), rest.begin() + static_cast<long>(insertAt));
+   result.insert(result.end(), block.begin(), block.end());
+   result.insert(result.end(), rest.begin() + static_cast<long>(insertAt), rest.end());
+   g_frames = result;
+   return 1;
+}
+
 int MSGPIAPI fShowForm(uint32_t, const char* title, const char* accept, const ColorizingDMDSettingField* fields,
                        uint32_t count, cdmdpi_settings_callback cb, void*)
 {
@@ -340,6 +372,7 @@ void setUpApi()
    g_api.SetDynamicColors = fSetDynamicColors;
    g_api.ClearColorRotations = fClearColorRotations;
    g_api.SetFrameComparison = fSetFrameComparison;
+   g_api.MoveFrames = fMoveFrames;
    g_api.ShowForm = fShowForm;
    g_bus.version = 1;
    g_bus.GetMsgID = bGetMsgID;
@@ -362,6 +395,7 @@ void resetProject(uint32_t w, uint32_t h, bool withZones)
    g_shown.clear();
    g_endEditApplied = 0;
    g_addFrameLimit = -1;
+   g_refuseMove = false;
    g_form = Form{};
    g_formsOpened = 0;
 }
@@ -423,7 +457,7 @@ void openMenu()
 
 // Runs the whole flow. option may be null for a transition without options; frames may be
 // negative to take whatever the window opened on.
-bool runFlow(const char* transition, const char* option, long frames)
+bool runFlow(const char* transition, const char* option, long frames, const char* placement = "end")
 {
    openMenu();
    if (!g_form.open)
@@ -440,6 +474,7 @@ bool runFlow(const char* transition, const char* option, long frames)
    CHECK(g_form.accept == "Apply");
    if (frames >= 0)
       g_settings["frames"] = std::to_string(frames);
+   g_settings["placement"] = placement;
    closeForm(true);
    return true;
 }
@@ -538,6 +573,14 @@ void testRegistry()
          CHECK(transitions::findOption(t, "x") == nullptr);
    }
    CHECK(transitions::findTransition("nope") == nullptr);
+   // Alphabetical, and one Split with both orientations.
+   for (size_t i = 1; i < transitions::kTransitionCount; ++i)
+      CHECK(std::string(transitions::kTransitions[i - 1].label) < std::string(transitions::kTransitions[i].label));
+   CHECK(transitions::findTransition("split_vertical") == nullptr);
+   CHECK(transitions::findTransition("split_horizontal") == nullptr);
+   const transitions::Transition* split = transitions::findTransition("split");
+   CHECK(split && split->optionCount == 2 && std::string(split->options[0].label) == "Horizontal" &&
+         std::string(split->options[1].label) == "Vertical");
    CHECK(transitions::findTransition("") == nullptr);
 }
 
@@ -640,7 +683,7 @@ void testDissolveSpecifics()
    const uint32_t w = 128, h = 32;
    // Orderly keeps one pixel in 256 at the last step.
    {
-      auto e = transitions::kTransitions[0].make("orderly", makeInfo(w, h));
+      auto e = transitions::findTransition("dissolve")->make("orderly", makeInfo(w, h));
       CHECK(visibleCount(*e, w, h, 255, 255) >= w * h / 256);
       // A pixel that is gone stays gone.
       for (uint32_t step = 1; step < 20; ++step)
@@ -651,8 +694,8 @@ void testDissolveSpecifics()
    }
    // Random: the same every time, and spread over the picture.
    {
-      auto a = transitions::kTransitions[0].make("random", makeInfo(w, h));
-      auto b = transitions::kTransitions[0].make("random", makeInfo(w, h));
+      auto a = transitions::findTransition("dissolve")->make("random", makeInfo(w, h));
+      auto b = transitions::findTransition("dissolve")->make("random", makeInfo(w, h));
       CHECK(signatureOf(*a, w, h, 5, 10) == signatureOf(*b, w, h, 5, 10));
       size_t quad[4] = {0, 0, 0, 0};
       for (uint32_t y = 0; y < h; ++y)
@@ -668,7 +711,7 @@ void testDissolveSpecifics()
    // Centre-Out hides the pixels near the centre first, Edge-In the ones at the edges first.
    for (const char* kind : {"centre_out", "edge_in"})
    {
-      auto e = transitions::kTransitions[0].make(kind, makeInfo(w, h));
+      auto e = transitions::findTransition("dissolve")->make(kind, makeInfo(w, h));
       auto dist = [&](uint32_t x, uint32_t y) {
          const double dx = (x + 0.5 - w / 2.0) / (w / 2.0), dy = (y + 0.5 - h / 2.0) / (h / 2.0);
          return dx * dx + dy * dy;
@@ -693,7 +736,7 @@ void testDissolveSpecifics()
    }
    // Spiral: gone pixels stay gone, and the first ones to go are next to each other.
    {
-      auto e = transitions::kTransitions[0].make("spiral", makeInfo(w, h));
+      auto e = transitions::findTransition("dissolve")->make("spiral", makeInfo(w, h));
       for (uint32_t step = 1; step < 20; ++step)
          for (uint32_t y = 0; y < h; ++y)
             for (uint32_t x = 0; x < w; ++x)
@@ -811,13 +854,13 @@ void testMovingSpecifics()
    for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
       {
-         auto r = ruleOf("split_vertical", "", x, y, 4, 10);
+         auto r = ruleOf("split", "vertical", x, y, 4, 10);
          if (r.visible)
          {
             CHECK(r.y == y);
             CHECK(x < w / 2 ? r.x > x : r.x < x);
          }
-         auto q = ruleOf("split_horizontal", "", x, y, 4, 10);
+         auto q = ruleOf("split", "horizontal", x, y, 4, 10);
          if (q.visible)
          {
             CHECK(q.x == x);
@@ -911,7 +954,7 @@ void testIcons()
    for (const Case& c : allCases())
    {
       const preview::Icon icon = preview::makeIcon(*c.transition, c.option);
-      CHECK(icon.width == 16 && icon.height == 4 && icon.gray.size() == 64);
+      CHECK(icon.width == 16 && icon.height == 6 && icon.gray.size() == 96);
       const auto [lo, hi] = std::minmax_element(icon.gray.begin(), icon.gray.end());
       // Every picture has light and dark in it.
       if (*lo == *hi)
@@ -1057,6 +1100,14 @@ void testWindowsOfTheFlow()
          CHECK(values[i] == std::to_string(i + 1));
       CHECK(f->def == "10");
    }
+   const Form::Field* place = fieldOf("placement");
+   CHECK(place && place->kind == CDMDPI_FIELD_CHOICE && place->def == "after");
+   if (place)
+   {
+      const auto values = choiceValues(*place);
+      CHECK(values.size() == 2 && values[0] == "after" && values[1] == "end");
+   }
+   g_settings["placement"] = "end";
    closeForm(true);
    CHECK(g_frames.size() == 12); // 10 new frames
    checkNewFrames(10, false);
@@ -1095,7 +1146,8 @@ void testSavedFramesAreClamped()
    resetProject(128, 32, false);
    g_settings["frames"] = "200";
    openMenu();
-   pick("transition", "split_horizontal");
+   pick("transition", "split");
+   pick("option_split", "horizontal");
    CHECK(g_form.open);
    const Form::Field* f = fieldOf("frames");
    CHECK(f != nullptr);
@@ -1110,7 +1162,8 @@ void testSavedFramesAreClamped()
    resetProject(128, 32, false);
    g_settings["frames"] = "banana";
    openMenu();
-   pick("transition", "split_horizontal");
+   pick("transition", "split");
+   pick("option_split", "horizontal");
    const Form::Field* g = fieldOf("frames");
    CHECK(g && !g->def.empty() && std::atol(g->def.c_str()) >= 1 && std::atol(g->def.c_str()) <= 15);
 }
@@ -1158,7 +1211,8 @@ void testProjectChangedWhileWindowsAreOpen()
 {
    resetProject(128, 32, false);
    openMenu();
-   pick("transition", "split_vertical");
+   pick("transition", "split");
+   pick("option_split", "vertical");
    CHECK(g_form.open);
    ++g_revision; // the author edits the project while the window is open
    closeForm(true);
@@ -1225,14 +1279,16 @@ void testNoRepeatedFramesInThePlugin()
 {
    // Every frame count the window offers gives all-different frames: the maximum of two
    // geometry-bound transitions, through the whole plugin.
-   for (const char* id : {"split_horizontal", "split_vertical"})
+   for (const char* option : {"horizontal", "vertical"})
    {
       resetProject(128, 32, false);
       openMenu();
-      pick("transition", id);
+      pick("transition", "split");
+      pick("option_split", option);
       const Form::Field* f = fieldOf("frames");
       const long most = f ? static_cast<long>(choiceValues(*f).size()) : 0;
       g_settings["frames"] = std::to_string(most);
+      g_settings["placement"] = "end";
       closeForm(true);
       CHECK(g_frames.size() == static_cast<size_t>(2 + most));
       std::set<std::vector<uint8_t>> seen;
@@ -1240,6 +1296,121 @@ void testNoRepeatedFramesInThePlugin()
          seen.insert(g_frames[i].sd.empty() ? g_frames[i].original : std::vector<uint8_t>(g_frames[i].original));
       CHECK(seen.size() == static_cast<size_t>(most));
    }
+}
+
+// A frame the tests can recognise after it has moved.
+void mark(size_t frame, uint32_t marker) { g_frames[frame].background = marker; }
+
+size_t litPixels(const Frame& f) { return f.original.size() - countShade(f.original, 0); }
+
+void testPlacementAfterTheSource()
+{
+   // Source in front: the new frames come between it and the frame that followed it.
+   resetProject(128, 32, false);
+   mark(1, 7);
+   runFlow("dissolve", "orderly", 4, "after");
+   CHECK(g_frames.size() == 6 && g_endEditApplied == 1);
+   CHECK(g_frames[5].background == 7);
+   CHECK(g_frames[0].background == CDMDPI_NONE);
+   for (size_t i = 1; i <= 4; ++i)
+   {
+      CHECK(g_frames[i].background == CDMDPI_NONE);
+      CHECK(g_frames[i].comparisonMask == CDMDPI_NONE);
+      if (i > 1)
+         CHECK(litPixels(g_frames[i]) < litPixels(g_frames[i - 1])); // in the order of the steps
+   }
+   CHECK(litPixels(g_frames[1]) < litPixels(g_frames[0]));
+   CHECK((g_shown == std::vector<uint32_t>{1, 2, 3, 4}));
+   CHECK(g_status.size() == 1 && g_status[0].find("as frames 1 to 4") != std::string::npos);
+
+   // Source in the middle.
+   resetProject(128, 32, false);
+   g_frames.push_back(makeSourceFrame(false));
+   mark(2, 9);
+   g_current = 1;
+   runFlow("slide", "left", 3, "after");
+   CHECK(g_frames.size() == 6);
+   CHECK(g_frames[5].background == 9);
+   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+   CHECK(g_frames[2].original != g_frames[1].original);
+
+   // Source last: the new frames already are behind it, nothing has to move.
+   resetProject(128, 32, false);
+   g_current = 1;
+   runFlow("wipe", "up", 3, "after");
+   CHECK(g_frames.size() == 5 && g_endEditApplied == 1);
+   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+
+   // The default of the window is "after".
+   resetProject(128, 32, false);
+   mark(1, 7);
+   openMenu();
+   pick("transition", "fade");
+   pick("option_fade", "black");
+   g_settings["frames"] = "3";
+   closeForm(true);
+   CHECK(g_frames.size() == 5 && g_frames[4].background == 7);
+}
+
+void testPlacementAtTheEnd()
+{
+   resetProject(128, 32, false);
+   mark(1, 7);
+   runFlow("blinds", "vertical", 3, "end");
+   CHECK(g_frames.size() == 5);
+   CHECK(g_frames[1].background == 7);
+   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+   CHECK(g_status.size() == 1 && g_status[0].find("as frames 2 to 4") != std::string::npos);
+}
+
+void testRefusedMoveRollsBack()
+{
+   resetProject(128, 32, true);
+   g_refuseMove = true;
+   runFlow("dissolve", "random", 3, "after");
+   CHECK(g_frames.size() == 2);
+   CHECK(g_endEditApplied == 0 && !g_inBatch);
+   CHECK(g_messages.size() == 1 && g_messages[0].find("Nothing was changed") != std::string::npos);
+   CHECK(g_status.empty());
+}
+
+void testBackTickBox()
+{
+   resetProject(128, 32, false);
+   openMenu();
+   CHECK(fieldOf("back") == nullptr); // the first window has nothing to go back to
+   pick("transition", "slide");
+   // Window 2 has the tick box; ticked, "Next" goes back to window 1 with the choice kept.
+   const Form::Field* b = fieldOf("back");
+   CHECK(b && b->kind == CDMDPI_FIELD_CHECKBOX && b->def == "0");
+   g_settings["back"] = "1";
+   closeForm(true);
+   CHECK(g_form.open && g_form.accept == "Next" && fieldOf("transition") != nullptr);
+   CHECK(g_settings["transition"] == "slide" && g_settings["back"] == "0");
+   // Forward again, with the tick box clear.
+   pick("transition", "wipe");
+   CHECK(g_form.open && fieldOf("option_wipe") != nullptr);
+   pick("option_wipe", "down");
+   // Window 3: ticked, "Apply" goes back to window 2, and nothing is made.
+   CHECK(g_form.open && g_form.accept == "Apply" && fieldOf("back") != nullptr);
+   g_settings["back"] = "1";
+   closeForm(true);
+   CHECK(g_form.open && g_form.accept == "Next" && fieldOf("option_wipe") != nullptr);
+   CHECK(g_frames.size() == 2 && g_endEditApplied == 0);
+   CHECK(g_settings["option_wipe"] == "down" && g_settings["back"] == "0");
+   // On again, to the end: now the frames are made.
+   pick("option_wipe", "down");
+   g_settings["placement"] = "end";
+   closeForm(true);
+   CHECK(g_frames.size() == 12 && g_endEditApplied == 1);
+   // A stale tick from an earlier visit does not take the next window back.
+   resetProject(128, 32, false);
+   g_settings["back"] = "1";
+   openMenu();
+   pick("transition", "slide");
+   CHECK(g_settings["back"] == "0");
+   pick("option_slide", "up");
+   CHECK(g_form.open && g_form.accept == "Apply");
 }
 
 } // namespace
@@ -1269,6 +1440,10 @@ int main()
    testBackgroundCaveat();
    testPicturesCanBeSwitchedOff();
    testNoRepeatedFramesInThePlugin();
+   testPlacementAfterTheSource();
+   testPlacementAtTheEnd();
+   testRefusedMoveRollsBack();
+   testBackTickBox();
    // Every transition through the windows, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};

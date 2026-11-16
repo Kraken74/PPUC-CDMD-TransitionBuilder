@@ -9,9 +9,9 @@
 //   3. the number of frames, from a list that holds exactly the numbers that work.
 //
 // The editor's windows cannot change one field when another does, so what depends on an earlier
-// choice (the options, the most frames) is in the next window. The plugin then appends that
-// many new frames at the end of the project, each a step further along the transition than the
-// one before. The last one is not completely black. All of it is one step of the editor's
+// choice (the options, the most frames) is in the next window. The plugin then adds that many
+// new frames, right after the starting frame or at the end of the project as the author chose,
+// each a step further along the transition than the one before. The last one is not completely black. All of it is one step of the editor's
 // history (one Undo).
 
 #include <algorithm>
@@ -39,6 +39,8 @@ constexpr const char* kTitle = "Transition Builder";
 constexpr const char* kSettingTransition = "transition";
 constexpr const char* kSettingPictures = "pictures";
 constexpr const char* kSettingFrames = "frames";
+constexpr const char* kSettingBack = "back"; // the tick box "go back" of the second and third window
+constexpr const char* kSettingPlacement = "placement"; // "after" the starting frame, or "end"
 constexpr const char* kUndoName = "Transition Builder";
 
 // A plane of the colorized frame: its pixels, and the size of the grid they lie on.
@@ -238,7 +240,8 @@ void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t widt
 
 // Creates the transition from the wizard's source frame and effect. Returns an empty string
 // when it worked, else what went wrong (and nothing was changed).
-std::string createTransition(uint32_t steps, bool& hadCaveat, std::string& caveat, uint32_t& firstNew)
+std::string createTransition(uint32_t steps, bool placeAfter, bool& hadCaveat, std::string& caveat,
+                             std::vector<uint32_t>& shown)
 {
    const Source& source = g_wizard.source;
    const transitions::Effect& effect = *g_wizard.effect;
@@ -335,11 +338,21 @@ std::string createTransition(uint32_t steps, bool& hadCaveat, std::string& cavea
       }
    }
 
+   // Right after the starting frame: the new frames were appended, so move them as one block to
+   // just behind it (nothing to do when they already are there).
+   if (placeAfter && created.front() != source.frame + 1)
+   {
+      if (!g_editor->MoveFrames(g_endpoint, created.data(), static_cast<uint32_t>(created.size()), source.frame + 1))
+         return fail("The editor refused to move the new frames behind the starting frame. Nothing was changed.");
+      for (uint32_t i = 0; i < created.size(); ++i)
+         created[i] = source.frame + 1 + i; // where they are now, in their order
+   }
+
    if (!g_editor->EndEdit(g_endpoint, 1))
       return "The editor did not record the new frames (the status bar may say why). Nothing was changed.";
 
-   firstNew = created.front();
-   g_editor->ShowFrames(created.front(), created.data(), static_cast<uint32_t>(created.size()));
+   shown = created;
+   g_editor->ShowFrames(shown.front(), shown.data(), static_cast<uint32_t>(shown.size()));
    return std::string();
 }
 
@@ -347,12 +360,34 @@ std::string createTransition(uint32_t steps, bool& hadCaveat, std::string& cavea
 
 void showFramesForm();
 void showOptionForm();
+void showTransitionForm();
+
+// The editor's windows have one button besides Cancel, so "Back" is a tick box: ticked, the
+// button of the window goes back one window instead of on. It is cleared whenever it is read.
+bool backRequested()
+{
+   const bool back = setting(kSettingBack, "0") == "1";
+   saveSetting(kSettingBack, "0");
+   return back;
+}
+
+const ColorizingDMDSettingField kBackField = {
+   kSettingBack, "Go back to the previous window", CDMDPI_FIELD_CHECKBOX, "0", nullptr,
+   "Tick this and click the button to go back one window instead of on. Your choices are kept."};
 
 // The third window was closed: make the frames.
 void MSGPIAPI onFramesChosen(void* /*userData*/, int saved)
 {
    if (!saved || !g_editor || !g_wizard.effect)
       return;
+   if (backRequested())
+   {
+      if (g_wizard.transition && g_wizard.transition->optionCount > 0)
+         showOptionForm();
+      else
+         showTransitionForm();
+      return;
+   }
 
    const std::string framesText = setting(kSettingFrames, "");
    char* end = nullptr;
@@ -365,8 +400,9 @@ void MSGPIAPI onFramesChosen(void* /*userData*/, int saved)
 
    bool hadCaveat = false;
    std::string caveat;
-   uint32_t firstNew = CDMDPI_NONE;
-   const std::string problem = createTransition(static_cast<uint32_t>(frames), hadCaveat, caveat, firstNew);
+   std::vector<uint32_t> shown;
+   const bool placeAfter = setting(kSettingPlacement, "after") != "end";
+   const std::string problem = createTransition(static_cast<uint32_t>(frames), placeAfter, hadCaveat, caveat, shown);
    if (!problem.empty())
    {
       message(kTitle, problem);
@@ -377,8 +413,8 @@ void MSGPIAPI onFramesChosen(void* /*userData*/, int saved)
    if (g_wizard.option)
       what += std::string(" (") + g_wizard.option->label + ")";
    g_editor->ShowStatus(g_endpoint, (std::string(kTitle) + ": added " + std::to_string(frames) + " frame(s) of " +
-                                     what + ", starting at frame " + std::to_string(firstNew) +
-                                     ". Undo takes them back.")
+                                     what + ", as frames " + std::to_string(shown.front()) + " to " +
+                                     std::to_string(shown.back()) + ". Undo takes them back.")
                                        .c_str());
    if (hadCaveat)
       message(kTitle, caveat);
@@ -407,6 +443,7 @@ void showFramesForm()
    const long remembered = std::strtol(setting(kSettingFrames, "10").c_str(), nullptr, 10);
    const uint32_t start = static_cast<uint32_t>(std::clamp<long>(remembered, 1, most));
    saveSetting(kSettingFrames, std::to_string(start));
+   saveSetting(kSettingBack, "0");
 
    std::string choices;
    for (uint32_t n = 1; n <= most; ++n)
@@ -418,14 +455,17 @@ void showFramesForm()
 
    const std::string note = what + ": from frame " + std::to_string(g_wizard.source.frame) + ", up to " +
                             std::to_string(most) + " different frames are possible (" +
-                            g_wizard.effect->limitReason() + "). The new frames are added at the end of the project.";
+                            g_wizard.effect->limitReason() + ").";
    // The form points into these strings, so they must live until ShowForm has returned.
    const std::string startText = std::to_string(start);
    const ColorizingDMDSettingField fields[] = {
       {nullptr, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr},
       {kSettingFrames, "Number of frames", CDMDPI_FIELD_CHOICE, startText.c_str(), choices.c_str(), nullptr},
+      {kSettingPlacement, "Place the new frames", CDMDPI_FIELD_CHOICE, "after",
+       "after=Right after the starting frame\nend=At the end of the project", nullptr},
+      kBackField,
    };
-   if (!g_editor->ShowForm(g_endpoint, what.c_str(), "Apply", fields, 2, onFramesChosen, nullptr))
+   if (!g_editor->ShowForm(g_endpoint, what.c_str(), "Apply", fields, 4, onFramesChosen, nullptr))
       message(kTitle, "The window could not be opened. Close other plugin windows and try again.");
 }
 
@@ -436,6 +476,11 @@ void MSGPIAPI onOptionChosen(void* /*userData*/, int saved)
 {
    if (!saved || !g_editor || !g_wizard.transition)
       return;
+   if (backRequested())
+   {
+      showTransitionForm();
+      return;
+   }
    g_wizard.option = transitions::findOption(*g_wizard.transition, setting(optionKey(*g_wizard.transition).c_str(), "").c_str());
    showFramesForm();
 }
@@ -452,11 +497,14 @@ void showOptionForm()
       choices += std::string(transition.options[i].id) + "=" + transition.options[i].label;
    }
 
+   saveSetting(kSettingBack, "0");
    const std::string key = optionKey(transition);
    std::vector<ColorizingDMDSettingField> fields;
    const std::string description = transition.description;
    fields.push_back({nullptr, description.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr});
    fields.push_back({key.c_str(), transition.optionLabel, CDMDPI_FIELD_CHOICE, transition.options[0].id, choices.c_str(), nullptr});
+
+   fields.push_back(kBackField);
 
    std::string gallery;
    if (picturesWanted())
@@ -492,7 +540,7 @@ void MSGPIAPI onTransitionChosen(void* /*userData*/, int saved)
       showFramesForm();
 }
 
-// The first window: the transition.
+// The menu entry: reads the selected frame, then opens the first window.
 void MSGPIAPI onMenuEntry(void* /*userData*/)
 {
    if (!g_editor)
@@ -504,7 +552,12 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       message(kTitle, problem);
       return;
    }
+   showTransitionForm();
+}
 
+// The first window: the transition.
+void showTransitionForm()
+{
    std::string choices;
    for (const auto& transition : transitions::kTransitions)
    {
@@ -513,8 +566,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       choices += std::string(transition.id) + "=" + transition.label;
    }
 
-   const std::string note = "Starting from frame " + std::to_string(g_wizard.source.frame) +
-                            ". The new frames are added at the end of the project.";
+   const std::string note = "Starting from frame " + std::to_string(g_wizard.source.frame) + ".";
    std::vector<ColorizingDMDSettingField> fields;
    fields.push_back({nullptr, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr});
    fields.push_back({kSettingTransition, "Transition", CDMDPI_FIELD_CHOICE, transitions::kTransitions[0].id,
