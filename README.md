@@ -139,25 +139,33 @@ GPL-3.0-or-later, like the editor and the headers in `include/`.
 ## Some Sample Transitions
 
 Alternating Vertical
+
 <img width="640" height="160" alt="Alternating Vertical" src="https://github.com/user-attachments/assets/32a995df-28ce-43e9-b159-f15fd101a3e9" />
 
 Blinds Vertical
+
 <img width="640" height="160" alt="Blinds Vertical" src="https://github.com/user-attachments/assets/68321ea2-b4f9-40b2-806e-21fcf7516a78" />
 
 Dissolve Random
+
 <img width="640" height="160" alt="Dissolve Random" src="https://github.com/user-attachments/assets/de1702bd-4480-46a6-a8f1-e742f7af4556" />
 
 Fade to Black
+
 <img width="640" height="160" alt="Fade to Black" src="https://github.com/user-attachments/assets/d2c3a01f-6750-4d15-b913-a0fae9bedea1" />
 
 Slide Right
+
 <img width="640" height="160" alt="Slide Right" src="https://github.com/user-attachments/assets/93945a2b-2381-43cc-9f6f-dac6f384c864" />
 
 Split Vertical
+
 <img width="640" height="160" alt="Split Vertical" src="https://github.com/user-attachments/assets/4b05fa97-1550-47e6-95ad-cbb18aa8aed4" />
 
 Wipe Centre-Out
+
 <img width="640" height="160" alt="Wipe Centre-Out" src="https://github.com/user-attachments/assets/517f777c-b3b3-47ae-938a-00be3ded432a" />
 
 Wipe Spiral
+
 <img width="640" height="160" alt="Wipe Spiral" src="https://github.com/user-attachments/assets/66c894c3-2344-43f0-83c3-ad7f8366417b" />
