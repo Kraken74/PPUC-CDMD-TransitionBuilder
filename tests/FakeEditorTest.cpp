@@ -2,8 +2,8 @@
 //
 // Tests of the Transition Builder: the effects on their own (every transition, every option, on
 // several frame sizes), and the plugin against a fake editor that implements the part of the
-// editor API the plugin uses, with edit batches that can be taken back. The windows are
-// scripted the way the author uses them: menu entry -> transition -> option -> frames.
+// editor API the plugin uses, with edit batches that can be taken back. The window is scripted
+// the way the author uses it: menu entry, then fields changed one by one, then Apply.
 
 #include <algorithm>
 #include <cmath>
@@ -52,15 +52,33 @@ struct Frame
    uint32_t background = CDMDPI_NONE;
    uint32_t comparisonMask = CDMDPI_NONE;
    uint32_t shapeMode = 0;
+   uint32_t durationMs = 50;
+   uint32_t startsScene = CDMDPI_NONE; // the scene the frame starts
+   uint32_t inScene = CDMDPI_NONE;     // the scene the frame belongs to
+};
+
+struct Scene
+{
+   uint32_t id = 0;
+   std::string name;
+   uint32_t durationMs = 0;
+   uint32_t repeat = 0;
+   uint32_t finish = 0;
+   uint32_t flags = 0;
+   uint32_t frames = 0;
 };
 
 std::vector<Frame> g_frames;
 std::vector<Frame> g_snapshot;
+std::vector<Scene> g_scenes;
+std::vector<Scene> g_sceneSnapshot;
 bool g_inBatch = false;
 uint64_t g_revision = 1;
 uint32_t g_current = 0;
 int g_addFrameLimit = -1;
 int g_addFrameCalls = 0;
+bool g_refuseMove = false;
+bool g_refuseScene = false;
 
 std::map<std::string, std::string> g_settings;
 std::vector<std::string> g_messages;
@@ -69,21 +87,33 @@ int g_endEditApplied = 0;
 std::vector<uint32_t> g_shown;
 cdmdpi_action_callback g_menuCallback = nullptr;
 
-// The window the plugin opened last.
+// The live form the plugin opened last.
 struct Form
 {
    std::string title, accept;
+   struct Image
+   {
+      uint32_t width, height, scale;
+      std::string caption;
+      std::vector<uint16_t> pixels;
+   };
    struct Field
    {
-      std::string key, label, def, choices;
+      std::string key, label, value, choices, help;
       uint32_t kind;
+      bool visible = true;
+      bool enabled = true;
+      std::vector<Image> images;
    };
    std::vector<Field> fields;
-   cdmdpi_settings_callback callback = nullptr;
+   cdmdpi_form_changed_callback changed = nullptr;
+   cdmdpi_form_closed_callback closed = nullptr;
+   void* userData = nullptr;
    bool open = false;
 };
 Form g_form;
 int g_formsOpened = 0;
+int g_fieldUpdates = 0;
 
 Frame makeSourceFrame(bool withZones)
 {
@@ -132,12 +162,13 @@ int MSGPIAPI fGetFrameInfo(uint32_t frame, ColorizingDMDFrameInfo* info)
    if (frame >= g_frames.size())
       return 0;
    std::memset(info, 0, sizeof(*info));
+   info->durationMs = g_frames[frame].durationMs;
    info->comparisonMask = g_frames[frame].comparisonMask;
    info->shapeMode = g_frames[frame].shapeMode;
    info->background = g_frames[frame].background;
    info->hasDynamicPixels = g_frames[frame].zones.empty() ? 0 : 1;
    info->hasHd = 0;
-   info->triggerId = CDMDPI_NONE;
+   info->triggerId = g_frames[frame].startsScene;
    info->section = CDMDPI_NONE;
    return 1;
 }
@@ -191,15 +222,20 @@ void MSGPIAPI fRemoveMenuEntries(uint32_t) { g_menuCallback = nullptr; }
 void MSGPIAPI fShowMessage(uint32_t, const char*, const char* text) { g_messages.push_back(text); }
 void MSGPIAPI fShowStatus(uint32_t, const char* text) { g_status.push_back(text); }
 
+uint32_t copyText(const std::string& text, char* value, uint32_t capacity)
+{
+   const uint32_t size = static_cast<uint32_t>(text.size() + 1);
+   if (capacity >= size)
+      std::memcpy(value, text.c_str(), size);
+   return size;
+}
+
 uint32_t MSGPIAPI fGetSetting(uint32_t, const char* key, char* value, uint32_t capacity)
 {
    auto it = g_settings.find(key);
    if (it == g_settings.end())
       return 0;
-   const uint32_t size = static_cast<uint32_t>(it->second.size() + 1);
-   if (capacity >= size)
-      std::memcpy(value, it->second.c_str(), size);
-   return size;
+   return copyText(it->second, value, capacity);
 }
 void MSGPIAPI fSetSetting(uint32_t, const char* key, const char* value) { g_settings[key] = value; }
 
@@ -209,6 +245,7 @@ int MSGPIAPI fBeginEdit(uint32_t, const char*)
       return 0;
    g_inBatch = true;
    g_snapshot = g_frames;
+   g_sceneSnapshot = g_scenes;
    g_addFrameCalls = 0;
    return 1;
 }
@@ -223,7 +260,10 @@ int MSGPIAPI fEndEdit(uint32_t, int apply)
       ++g_revision;
    }
    else
+   {
       g_frames = g_snapshot;
+      g_scenes = g_sceneSnapshot;
+   }
    return 1;
 }
 
@@ -236,6 +276,7 @@ int MSGPIAPI fAddFrame(uint32_t, const uint8_t* original, uint32_t count, uint32
    ++g_addFrameCalls;
    Frame f = g_frames[like];
    f.original.assign(original, original + count);
+   f.startsScene = CDMDPI_NONE; // AddFrame leaves the trigger out
    g_frames.push_back(f);
    if (frame)
       *frame = static_cast<uint32_t>(g_frames.size() - 1);
@@ -288,7 +329,6 @@ int MSGPIAPI fClearColorRotations(uint32_t, uint32_t frame)
    return 1;
 }
 
-bool g_refuseMove = false;
 int MSGPIAPI fMoveFrames(uint32_t, const uint32_t* frames, uint32_t count, uint32_t before)
 {
    if (!g_inBatch || g_refuseMove || before > g_frames.size() || count == 0)
@@ -320,36 +360,272 @@ int MSGPIAPI fMoveFrames(uint32_t, const uint32_t* frames, uint32_t count, uint3
    return 1;
 }
 
-int MSGPIAPI fShowForm(uint32_t, const char* title, const char* accept, const ColorizingDMDSettingField* fields,
-                       uint32_t count, cdmdpi_settings_callback cb, void*)
+int MSGPIAPI fDeleteFrames(uint32_t, const uint32_t* frames, uint32_t count)
 {
+   if (!g_inBatch || count == 0 || count >= g_frames.size())
+      return 0;
+   std::vector<bool> deleting(g_frames.size(), false);
+   for (uint32_t i = 0; i < count; ++i)
+   {
+      if (frames[i] >= g_frames.size())
+         return 0;
+      deleting[frames[i]] = true;
+   }
+   std::vector<Frame> kept;
+   for (size_t i = 0; i < g_frames.size(); ++i)
+      if (!deleting[i])
+         kept.push_back(g_frames[i]);
+   g_frames = kept;
+   return 1;
+}
+
+int MSGPIAPI fCreateScene(uint32_t, const ColorizingDMDScene* scene, const uint32_t* frames, uint32_t count,
+                          uint32_t* sceneId, uint32_t* firstFrame)
+{
+   if (!g_inBatch || g_refuseScene || !scene || count == 0 || g_w != 128 || g_h != 32 ||
+       scene->durationMs > 65535 || scene->groups > 1)
+      return 0;
+   for (uint32_t i = 0; i < count; ++i)
+      if (frames[i] >= g_frames.size() || g_frames[frames[i]].inScene != CDMDPI_NONE)
+         return 0;
+   uint32_t id = scene->sceneId;
+   if (id == CDMDPI_NONE)
+   {
+      id = 50000;
+      for (const Scene& s : g_scenes)
+         id = std::max(id, s.id + 1);
+   }
+   Scene made;
+   made.id = id;
+   made.name = scene->name ? scene->name : "";
+   made.durationMs = scene->durationMs ? scene->durationMs : 33;
+   made.repeat = scene->repeat;
+   made.finish = scene->finish;
+   made.flags = scene->flags;
+   made.frames = count;
+   g_scenes.push_back(made);
+   const uint32_t first = static_cast<uint32_t>(g_frames.size());
+   for (uint32_t i = 0; i < count; ++i)
+   {
+      Frame f = g_frames[frames[i]];
+      f.zones.clear(); // a frame of a scene has no dynamic zones
+      f.startsScene = CDMDPI_NONE;
+      f.inScene = id;
+      g_frames.push_back(f);
+   }
+   if (sceneId)
+      *sceneId = id;
+   if (firstFrame)
+      *firstFrame = first;
+   return 1;
+}
+
+int MSGPIAPI fSetFrameScene(uint32_t, uint32_t frame, uint32_t scene)
+{
+   if (!g_inBatch || frame >= g_frames.size() || g_frames[frame].inScene != CDMDPI_NONE)
+      return 0;
+   if (scene != CDMDPI_NONE &&
+       std::none_of(g_scenes.begin(), g_scenes.end(), [&](const Scene& s) { return s.id == scene; }))
+      return 0;
+   g_frames[frame].startsScene = scene;
+   return 1;
+}
+
+// ---- The fake live form ---------------------------------------------------------------------
+
+Form::Field* fieldOf(const char* key)
+{
+   for (auto& f : g_form.fields)
+      if (f.key == key)
+         return &f;
+   return nullptr;
+}
+
+// The values a CHOICE offers ("value=label" lines or plain values).
+std::vector<std::string> choiceValues(const std::string& choices)
+{
+   std::vector<std::string> out;
+   size_t start = 0;
+   while (start <= choices.size())
+   {
+      size_t end = choices.find('\n', start);
+      if (end == std::string::npos)
+         end = choices.size();
+      std::string line = choices.substr(start, end - start);
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos)
+         line = line.substr(0, eq);
+      if (!line.empty())
+         out.push_back(line);
+      start = end + 1;
+   }
+   return out;
+}
+std::vector<std::string> choiceValues(const Form::Field& f) { return choiceValues(f.choices); }
+
+bool offers(const std::string& choices, const std::string& value)
+{
+   const auto values = choiceValues(choices);
+   return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+std::vector<Form::Image> copyImages(const ColorizingDMDFormImage* images, uint32_t count)
+{
+   std::vector<Form::Image> out;
+   for (uint32_t i = 0; i < count; ++i)
+   {
+      const ColorizingDMDFormImage& image = images[i];
+      out.push_back({image.width, image.height, image.scale, image.caption ? image.caption : "",
+                     std::vector<uint16_t>(image.pixels, image.pixels + static_cast<size_t>(image.width) * image.height)});
+   }
+   return out;
+}
+
+int MSGPIAPI fShowLiveForm(uint32_t, const char* title, const char* accept, const char* const*, uint32_t extraCount,
+                           const ColorizingDMDFormField* fields, uint32_t count, cdmdpi_form_changed_callback changed,
+                           cdmdpi_form_closed_callback closed, void* userData)
+{
+   if (g_form.open || !fields || count == 0 || !closed || extraCount > CDMDPI_FORM_MAX_BUTTONS)
+      return 0;
    ++g_formsOpened;
    g_form = Form{};
    g_form.title = title;
    g_form.accept = accept ? accept : "";
-   g_form.callback = cb;
+   g_form.changed = changed;
+   g_form.closed = closed;
+   g_form.userData = userData;
    g_form.open = true;
    for (uint32_t i = 0; i < count; ++i)
-      g_form.fields.push_back({fields[i].key ? fields[i].key : "", fields[i].label ? fields[i].label : "",
-                               fields[i].defaultValue ? fields[i].defaultValue : "",
-                               fields[i].choices ? fields[i].choices : "", fields[i].kind});
+   {
+      const ColorizingDMDFormField& in = fields[i];
+      Form::Field f;
+      f.key = in.key ? in.key : "";
+      f.label = in.label ? in.label : "";
+      f.value = in.defaultValue ? in.defaultValue : "";
+      f.choices = in.choices ? in.choices : "";
+      f.help = in.help ? in.help : "";
+      f.kind = in.kind;
+      f.visible = !(in.flags & CDMDPI_FORM_HIDDEN);
+      f.enabled = !(in.flags & CDMDPI_FORM_DISABLED);
+      if (in.kind == CDMDPI_FIELD_IMAGE)
+         f.images = copyImages(in.images, in.imageCount);
+      // As the editor: a choice opens on its first entry when the value is not in the list.
+      if (in.kind == CDMDPI_FIELD_CHOICE && !offers(f.choices, f.value))
+         f.value = choiceValues(f.choices).empty() ? std::string() : choiceValues(f.choices).front();
+      g_form.fields.push_back(f);
+   }
    return 1;
 }
 
-ColorizingDMDEditorAPI g_api{};
+uint32_t MSGPIAPI fGetFormValue(uint32_t, const char* key, char* value, uint32_t capacity)
+{
+   const Form::Field* f = g_form.open || g_form.closed ? fieldOf(key) : nullptr;
+   if (!f || f->kind == CDMDPI_FIELD_NOTE || f->kind == CDMDPI_FIELD_IMAGE)
+      return 0;
+   return copyText(f->value, value, capacity);
+}
 
-unsigned int MSGPIAPI bGetMsgID(const char*, const char*) { return 7; }
+int MSGPIAPI fSetFormField(uint32_t, const char* key, const ColorizingDMDFormFieldUpdate* update)
+{
+   Form::Field* f = g_form.open ? fieldOf(key) : nullptr;
+   if (!f || !update)
+      return 0;
+   const uint32_t c = update->changes;
+   if ((c & CDMDPI_FORM_SET_VALUE) && (f->kind == CDMDPI_FIELD_NOTE || f->kind == CDMDPI_FIELD_IMAGE))
+      return 0;
+   if ((c & CDMDPI_FORM_SET_CHOICES) && (f->kind != CDMDPI_FIELD_CHOICE || !update->choices || !*update->choices))
+      return 0;
+   if ((c & CDMDPI_FORM_SET_IMAGES) && f->kind != CDMDPI_FIELD_IMAGE)
+      return 0;
+   const std::string choices = (c & CDMDPI_FORM_SET_CHOICES) ? update->choices : f->choices;
+   if ((c & CDMDPI_FORM_SET_VALUE) && f->kind == CDMDPI_FIELD_CHOICE && !offers(choices, update->value ? update->value : ""))
+      return 0;
+   ++g_fieldUpdates;
+   if (c & CDMDPI_FORM_SET_ENABLED)
+      f->enabled = update->enabled != 0;
+   if (c & CDMDPI_FORM_SET_VISIBLE)
+      f->visible = update->visible != 0;
+   if (c & CDMDPI_FORM_SET_LABEL)
+      f->label = update->label ? update->label : "";
+   if (c & CDMDPI_FORM_SET_HELP)
+      f->help = update->help ? update->help : "";
+   if (c & CDMDPI_FORM_SET_IMAGES)
+      f->images = copyImages(update->images, update->imageCount);
+   if (c & CDMDPI_FORM_SET_CHOICES)
+   {
+      f->choices = choices;
+      if (!offers(f->choices, f->value))
+         f->value = choiceValues(f->choices).front();
+   }
+   if (c & CDMDPI_FORM_SET_VALUE)
+      f->value = update->value ? update->value : "";
+   return 1;
+}
+
+int MSGPIAPI fCloseForm(uint32_t)
+{
+   if (!g_form.open)
+      return 0;
+   g_form.open = false;
+   g_form.closed = nullptr;
+   return 1;
+}
+
+// ---- The fake bus ---------------------------------------------------------------------------
+
+ColorizingDMDEditorAPI g_api{};
+std::vector<std::string> g_msgNames;
+struct Subscription
+{
+   unsigned int msgId;
+   msgpi_msg_callback callback;
+   void* userData;
+};
+std::vector<Subscription> g_subscriptions;
+
+unsigned int MSGPIAPI bGetMsgID(const char* nameSpace, const char* name)
+{
+   const std::string full = std::string(nameSpace) + "/" + name;
+   for (size_t i = 0; i < g_msgNames.size(); ++i)
+      if (g_msgNames[i] == full)
+         return static_cast<unsigned int>(i + 1);
+   g_msgNames.push_back(full);
+   return static_cast<unsigned int>(g_msgNames.size());
+}
+unsigned int msgIdOf(const char* name) { return bGetMsgID(CDMDPI_NAMESPACE, name); }
 void MSGPIAPI bBroadcast(const uint32_t, const unsigned int msgId, void* data)
 {
-   if (msgId == 7)
+   if (msgId == msgIdOf(CDMDPI_MSG_GET_API))
       *static_cast<const ColorizingDMDEditorAPI**>(data) = &g_api;
 }
 void MSGPIAPI bRelease(const unsigned int) {}
+void MSGPIAPI bSubscribe(const uint32_t, const unsigned int msgId, const msgpi_msg_callback callback, void* userData)
+{
+   g_subscriptions.push_back({msgId, callback, userData});
+}
+void MSGPIAPI bUnsubscribe(const unsigned int msgId, const msgpi_msg_callback callback, void* userData)
+{
+   g_subscriptions.erase(std::remove_if(g_subscriptions.begin(), g_subscriptions.end(),
+                                        [&](const Subscription& s) {
+                                           return s.msgId == msgId && s.callback == callback && s.userData == userData;
+                                        }),
+                         g_subscriptions.end());
+}
 MsgPluginAPI g_bus{};
+
+// The editor broadcasts one of its events.
+void fireEvent(const char* name)
+{
+   const unsigned int id = msgIdOf(name);
+   const std::vector<Subscription> subscriptions = g_subscriptions;
+   for (const Subscription& s : subscriptions)
+      if (s.msgId == id)
+         s.callback(id, s.userData, nullptr);
+}
 
 void setUpApi()
 {
-   g_api.version = 8;
+   g_api.version = 9;
    g_api.GetProjectInfo = fGetProjectInfo;
    g_api.GetFrameInfo = fGetFrameInfo;
    g_api.GetOriginalFrame = fGetOriginalFrame;
@@ -373,11 +649,19 @@ void setUpApi()
    g_api.ClearColorRotations = fClearColorRotations;
    g_api.SetFrameComparison = fSetFrameComparison;
    g_api.MoveFrames = fMoveFrames;
-   g_api.ShowForm = fShowForm;
+   g_api.DeleteFrames = fDeleteFrames;
+   g_api.ShowLiveForm = fShowLiveForm;
+   g_api.GetFormValue = fGetFormValue;
+   g_api.SetFormField = fSetFormField;
+   g_api.CloseForm = fCloseForm;
+   g_api.CreateScene = fCreateScene;
+   g_api.SetFrameScene = fSetFrameScene;
    g_bus.version = 1;
    g_bus.GetMsgID = bGetMsgID;
    g_bus.BroadcastMsg = bBroadcast;
    g_bus.ReleaseMsgID = bRelease;
+   g_bus.SubscribeMsg = bSubscribe;
+   g_bus.UnsubscribeMsg = bUnsubscribe;
 }
 
 void resetProject(uint32_t w, uint32_t h, bool withZones)
@@ -387,6 +671,7 @@ void resetProject(uint32_t w, uint32_t h, bool withZones)
    g_frames.clear();
    g_frames.push_back(makeSourceFrame(withZones));
    g_frames.push_back(makeSourceFrame(withZones));
+   g_scenes.clear();
    g_inBatch = false;
    g_current = 0;
    g_settings.clear();
@@ -396,89 +681,71 @@ void resetProject(uint32_t w, uint32_t h, bool withZones)
    g_endEditApplied = 0;
    g_addFrameLimit = -1;
    g_refuseMove = false;
+   g_refuseScene = false;
    g_form = Form{};
    g_formsOpened = 0;
 }
 
-// ---- Scripting the windows ------------------------------------------------------------------
+// ---- Scripting the window -------------------------------------------------------------------
 
-const Form::Field* fieldOf(const char* key)
+// The author picks a value in a field of the open window: the editor shows it and tells the
+// plugin.
+void change(const char* key, const std::string& value)
 {
-   for (const auto& f : g_form.fields)
-      if (f.key == key)
-         return &f;
-   return nullptr;
-}
-
-// The values a CHOICE field offers ("value=label" lines or plain values).
-std::vector<std::string> choiceValues(const Form::Field& f)
-{
-   std::vector<std::string> out;
-   size_t start = 0;
-   while (start <= f.choices.size())
+   Form::Field* f = fieldOf(key);
+   CHECK(g_form.open && f != nullptr);
+   if (!g_form.open || !f)
+      return;
+   CHECK(f->visible && f->enabled);
+   if (f->kind == CDMDPI_FIELD_CHOICE)
    {
-      size_t end = f.choices.find('\n', start);
-      if (end == std::string::npos)
-         end = f.choices.size();
-      std::string line = f.choices.substr(start, end - start);
-      const size_t eq = line.find('=');
-      if (eq != std::string::npos)
-         line = line.substr(0, eq);
-      if (!line.empty())
-         out.push_back(line);
-      start = end + 1;
+      if (!offers(f->choices, value))
+         std::printf("%s does not offer %s\n", key, value.c_str());
+      CHECK(offers(f->choices, value));
    }
-   return out;
+   f->value = value;
+   if (g_form.changed)
+      g_form.changed(g_form.userData, key);
 }
 
-// The author closes the open window: with Apply/Next (saved) or Cancel.
-void closeForm(bool saved)
+// The author closes the window: with Apply (the values are kept as settings) or Cancel.
+void closeForm(bool accepted)
 {
    CHECK(g_form.open);
    g_form.open = false;
-   cdmdpi_settings_callback cb = g_form.callback;
-   cb(nullptr, saved ? 1 : 0);
-}
-
-// Picks a value in the open window's field, as the editor stores it, then closes it with Next.
-void pick(const char* key, const std::string& value)
-{
-   CHECK(fieldOf(key) != nullptr);
-   g_settings[key] = value;
-   closeForm(true);
+   if (accepted)
+      for (const auto& f : g_form.fields)
+         if (!f.key.empty() && f.kind != CDMDPI_FIELD_NOTE && f.kind != CDMDPI_FIELD_IMAGE)
+            g_settings[f.key] = f.value;
+   cdmdpi_form_closed_callback closed = g_form.closed;
+   if (closed)
+      closed(g_form.userData, accepted ? CDMDPI_FORM_ACCEPTED : CDMDPI_FORM_CANCELLED);
+   g_form.closed = nullptr;
 }
 
 void openMenu()
 {
    CHECK(g_menuCallback != nullptr);
-   g_form.open = false;
    g_menuCallback(nullptr);
 }
 
 // Runs the whole flow. option may be null for a transition without options; frames may be
-// negative to take whatever the window opened on.
+// negative to take whatever the window shows.
 bool runFlow(const char* transition, const char* option, long frames, const char* placement = "end")
 {
    openMenu();
    if (!g_form.open)
       return false;
-   pick("transition", transition);
-   if (option)
-   {
-      CHECK(g_form.open);
-      CHECK(g_form.accept == "Next");
-      pick((std::string("option_") + transition).c_str(), option);
-   }
-   if (!g_form.open)
-      return false;
    CHECK(g_form.accept == "Apply");
+   change("transition", transition);
+   if (option)
+      change("option", option);
    if (frames >= 0)
-      g_settings["frames"] = std::to_string(frames);
-   g_settings["placement"] = placement;
+      change("frames", std::to_string(frames));
+   change("placement", placement);
    closeForm(true);
    return true;
 }
-
 // ---- Helpers for the effects ----------------------------------------------------------------
 
 struct Case
@@ -949,25 +1216,20 @@ void testFadeSpecifics()
    }
 }
 
-void testIcons()
+void testPreviewSteps()
 {
-   for (const Case& c : allCases())
+   CHECK((preview::previewSteps(1) == std::vector<uint32_t>{1}));
+   CHECK((preview::previewSteps(2) == std::vector<uint32_t>{1, 2}));
+   CHECK((preview::previewSteps(5) == std::vector<uint32_t>{2, 3, 4, 5}));
+   CHECK((preview::previewSteps(255) == std::vector<uint32_t>{64, 128, 192, 255}));
+   for (uint32_t steps = 1; steps <= 255; ++steps)
    {
-      const preview::Icon icon = preview::makeIcon(*c.transition, c.option);
-      CHECK(icon.width == 16 && icon.height == 6 && icon.gray.size() == 96);
-      const auto [lo, hi] = std::minmax_element(icon.gray.begin(), icon.gray.end());
-      // Every picture has light and dark in it.
-      if (*lo == *hi)
-         std::printf("flat icon for %s\n", c.name().c_str());
-      CHECK(*lo < *hi);
+      const auto shown = preview::previewSteps(steps);
+      CHECK(!shown.empty() && shown.size() <= preview::kPreviewPictures && shown.back() == steps);
+      for (size_t i = 1; i < shown.size(); ++i)
+         CHECK(shown[i - 1] < shown[i]);
    }
-   std::vector<preview::GalleryItem> items;
-   for (const auto& t : transitions::kTransitions)
-      items.push_back({t.label, preview::makeIcon(t, t.optionCount ? &t.options[0] : nullptr)});
-   const std::string html = preview::galleryHtml("a <b> & c", items);
-   CHECK(!html.empty() && html[0] == '<');
-   CHECK(html.find("a &lt;b&gt; &amp; c") != std::string::npos);
-   CHECK(html.find("background-color:#") != std::string::npos);
+   CHECK(preview::previewScale(128) == 2 && preview::previewScale(256) == 1);
 }
 
 // ---- Plugin tests ---------------------------------------------------------------------------
@@ -995,7 +1257,7 @@ void checkNewFrames(size_t added, bool zones)
    CHECK(g_frames[0].sd == makeSourceFrame(zones).sd);
 }
 
-void testEveryTransitionThroughTheWindows(uint32_t w, uint32_t h, bool zones)
+void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
 {
    for (const Case& c : allCases())
    {
@@ -1052,12 +1314,13 @@ void testEveryTransitionThroughTheWindows(uint32_t w, uint32_t h, bool zones)
    }
 }
 
-void testWindowsOfTheFlow()
+void testTheWindow()
 {
    resetProject(128, 32, false);
    openMenu();
-   // Window 1: the transition list holds every transition; the pictures check box exists.
-   CHECK(g_form.open && g_form.accept == "Next");
+   CHECK(g_form.open && g_form.accept == "Apply" && g_formsOpened == 1);
+
+   // The transition list holds every transition, the first one chosen at first.
    const Form::Field* t = fieldOf("transition");
    CHECK(t && t->kind == CDMDPI_FIELD_CHOICE);
    if (t)
@@ -1066,30 +1329,25 @@ void testWindowsOfTheFlow()
       CHECK(values.size() == transitions::kTransitionCount);
       for (size_t i = 0; i < values.size(); ++i)
          CHECK(values[i] == transitions::kTransitions[i].id);
+      CHECK(t->value == transitions::kTransitions[0].id);
    }
-   const Form::Field* pic = fieldOf("pictures");
-   CHECK(pic && pic->kind == CDMDPI_FIELD_CHECKBOX);
-   size_t notes = 0;
-   for (const auto& f : g_form.fields)
-      notes += f.kind == CDMDPI_FIELD_NOTE;
-   CHECK(notes == 2); // the intro and the gallery
-   pick("transition", "dissolve");
+   const Form::Field* source = fieldOf("source");
+   CHECK(source && source->kind == CDMDPI_FIELD_NOTE && source->label.find("frame 0") != std::string::npos);
 
-   // Window 2: the dissolve types.
-   CHECK(g_form.open && g_form.accept == "Next");
-   const Form::Field* o = fieldOf("option_dissolve");
-   CHECK(o && o->kind == CDMDPI_FIELD_CHOICE);
+   // The option follows the transition: its label, its list, its help.
+   change("transition", "dissolve");
+   const Form::Field* o = fieldOf("option");
+   CHECK(o && o->kind == CDMDPI_FIELD_CHOICE && o->visible);
    if (o)
    {
-      const auto values = choiceValues(*o);
       const std::vector<std::string> want = {"orderly", "random", "centre_out", "edge_in", "spiral"};
-      CHECK(values == want);
-      CHECK(o->label == "Dissolve Type");
+      CHECK(choiceValues(*o) == want);
+      CHECK(o->label == "Dissolve Type" && o->value == "orderly");
+      CHECK(o->help.find("Spiral") != std::string::npos);
    }
-   pick("option_dissolve", "spiral");
+   change("option", "spiral");
 
-   // Window 3: exactly 1 .. maxSteps, no free text.
-   CHECK(g_form.open && g_form.accept == "Apply");
+   // The frames list: exactly 1 .. maxSteps, opened on 10.
    const Form::Field* f = fieldOf("frames");
    CHECK(f && f->kind == CDMDPI_FIELD_CHOICE);
    if (f)
@@ -1098,19 +1356,80 @@ void testWindowsOfTheFlow()
       CHECK(values.size() == 255);
       for (size_t i = 0; i < values.size(); ++i)
          CHECK(values[i] == std::to_string(i + 1));
-      CHECK(f->def == "10");
+      CHECK(f->value == "10");
    }
+
+   // Another transition: its own options, and a frames list that keeps 10 where it can.
+   change("transition", "split");
+   CHECK(o && o->label == "Orientation" && (choiceValues(*o) == std::vector<std::string>{"horizontal", "vertical"}));
+   CHECK(f && choiceValues(*f).size() == 15 && f->value == "10");
+   change("frames", "15");
+   change("option", "vertical");
+   // Split Vertical makes more frames on 128 x 32 than Horizontal; 15 still works.
+   CHECK(f && choiceValues(*f).size() > 15 && f->value == "15");
+   change("option", "horizontal");
+   CHECK(f && choiceValues(*f).size() == 15 && f->value == "15");
+
+   // Where the new frames go: after, at the end, or as a scene on 128 x 32.
    const Form::Field* place = fieldOf("placement");
-   CHECK(place && place->kind == CDMDPI_FIELD_CHOICE && place->def == "after");
+   CHECK(place && place->kind == CDMDPI_FIELD_CHOICE && place->value == "after");
    if (place)
+      CHECK((choiceValues(*place) == std::vector<std::string>{"after", "end", "scene"}));
+   const Form::Field* duration = fieldOf("duration");
+   CHECK(duration && duration->kind == CDMDPI_FIELD_TEXT && !duration->visible && duration->value == "50");
+   change("placement", "scene");
+   CHECK(duration && duration->visible);
+   change("placement", "end");
+   CHECK(duration && !duration->visible);
+
+   // The preview: steps of the transition on the author's frame, as Apply draws them.
+   const Form::Field* pictures = fieldOf("preview");
+   CHECK(pictures && pictures->kind == CDMDPI_FIELD_IMAGE && pictures->visible);
+   if (pictures)
    {
-      const auto values = choiceValues(*place);
-      CHECK(values.size() == 2 && values[0] == "after" && values[1] == "end");
+      CHECK(pictures->images.size() == 4);
+      for (const auto& image : pictures->images)
+         CHECK(image.width == 128 && image.height == 32 && image.scale == 2 && image.pixels.size() == 128u * 32u);
+      CHECK(!pictures->images.empty() && pictures->images.back().caption == "Frame 15 of 15");
    }
-   g_settings["placement"] = "end";
+   const std::vector<uint16_t> lastPreview = pictures && !pictures->images.empty() ? pictures->images.back().pixels
+                                                                                   : std::vector<uint16_t>{};
+   change("frames", "3");
+   CHECK(pictures && pictures->images.size() == 3 && pictures->images.back().caption == "Frame 3 of 3");
+
    closeForm(true);
-   CHECK(g_frames.size() == 12); // 10 new frames
-   checkNewFrames(10, false);
+   CHECK(!g_form.open && g_frames.size() == 5);
+   checkNewFrames(3, false);
+   // What the preview showed for the last frame is what the last frame is.
+   resetProject(128, 32, false);
+   g_settings["transition"] = "split";
+   g_settings["option_split"] = "horizontal";
+   g_settings["frames"] = "15";
+   g_settings["placement"] = "end";
+   openMenu();
+   closeForm(true);
+   CHECK(g_frames.size() == 17 && g_frames.back().sd == lastPreview);
+}
+
+void testTheWindowRemembers()
+{
+   resetProject(128, 32, false);
+   runFlow("wipe", "down", 4, "end");
+   CHECK(g_frames.size() == 6);
+   // The next time the window opens on the same choices.
+   openMenu();
+   CHECK(fieldOf("transition") && fieldOf("transition")->value == "wipe");
+   CHECK(fieldOf("option") && fieldOf("option")->value == "down" && fieldOf("option")->label == "Direction");
+   CHECK(fieldOf("frames") && fieldOf("frames")->value == "4");
+   CHECK(fieldOf("placement") && fieldOf("placement")->value == "end");
+   // An option is remembered per transition.
+   change("transition", "slide");
+   change("option", "right");
+   change("transition", "wipe");
+   CHECK(fieldOf("option")->value == "down");
+   change("transition", "slide");
+   CHECK(fieldOf("option")->value == "right");
+   closeForm(false);
 }
 
 void testFramesListMatchesTheMaximum()
@@ -1121,10 +1440,9 @@ void testFramesListMatchesTheMaximum()
       {
          resetProject(sz[0], sz[1], false);
          openMenu();
-         pick("transition", c.transition->id);
+         change("transition", c.transition->id);
          if (c.option)
-            pick((std::string("option_") + c.transition->id).c_str(), c.option->id);
-         CHECK(g_form.open && g_form.accept == "Apply");
+            change("option", c.option->id);
          const Form::Field* f = fieldOf("frames");
          if (!f)
          {
@@ -1137,6 +1455,7 @@ void testFramesListMatchesTheMaximum()
          if (!isFade(c))
             CHECK(choiceValues(*f).size() == e->maxSteps());
          CHECK(!choiceValues(*f).empty());
+         closeForm(false);
       }
 }
 
@@ -1144,55 +1463,35 @@ void testSavedFramesAreClamped()
 {
    // The saved number is larger than this transition allows: the window opens on the most.
    resetProject(128, 32, false);
+   g_settings["transition"] = "split";
+   g_settings["option_split"] = "horizontal";
    g_settings["frames"] = "200";
    openMenu();
-   pick("transition", "split");
-   pick("option_split", "horizontal");
-   CHECK(g_form.open);
    const Form::Field* f = fieldOf("frames");
-   CHECK(f != nullptr);
-   if (f)
-   {
-      const size_t most = choiceValues(*f).size();
-      CHECK(most == 15);
-      CHECK(f->def == std::to_string(most));
-      CHECK(g_settings["frames"] == std::to_string(most));
-   }
+   CHECK(f && choiceValues(*f).size() == 15 && f->value == "15");
+   closeForm(false);
    // And one saved as nonsense opens on a valid number.
    resetProject(128, 32, false);
+   g_settings["transition"] = "split";
    g_settings["frames"] = "banana";
    openMenu();
-   pick("transition", "split");
-   pick("option_split", "horizontal");
    const Form::Field* g = fieldOf("frames");
-   CHECK(g && !g->def.empty() && std::atol(g->def.c_str()) >= 1 && std::atol(g->def.c_str()) <= 15);
+   CHECK(g && std::atol(g->value.c_str()) >= 1 && std::atol(g->value.c_str()) <= 15);
+   closeForm(false);
 }
 
 void testCancelChangesNothing()
 {
-   // Cancel in each of the three windows.
-   for (int where = 0; where < 3; ++where)
-   {
-      resetProject(128, 32, false);
-      openMenu();
-      if (where == 0)
-         closeForm(false);
-      else
-      {
-         pick("transition", "dissolve");
-         if (where == 1)
-            closeForm(false);
-         else
-         {
-            pick("option_dissolve", "random");
-            closeForm(false);
-         }
-      }
-      CHECK(g_frames.size() == 2);
-      CHECK(g_endEditApplied == 0);
-      CHECK(!g_form.open);
-      CHECK(g_messages.empty());
-   }
+   resetProject(128, 32, false);
+   openMenu();
+   change("transition", "dissolve");
+   change("option", "random");
+   closeForm(false);
+   CHECK(g_frames.size() == 2);
+   CHECK(g_endEditApplied == 0);
+   CHECK(!g_form.open);
+   CHECK(g_messages.empty());
+   CHECK(g_settings.count("transition") == 0); // Cancel keeps no values
 }
 
 void testRefusalRollsBack()
@@ -1207,17 +1506,53 @@ void testRefusalRollsBack()
    CHECK(g_status.empty());
 }
 
-void testProjectChangedWhileWindowsAreOpen()
+void testTheWindowFollowsTheCurrentFrame()
 {
    resetProject(128, 32, false);
+   g_frames.push_back(makeSourceFrame(false));
+   // Frame 2 is all black but for its left half: fewer lit pixels than frame 0.
+   for (uint32_t y = 0; y < g_h; ++y)
+      for (uint32_t x = g_w / 2; x < g_w; ++x)
+      {
+         g_frames[2].original[static_cast<size_t>(y) * g_w + x] = 0;
+         g_frames[2].sd[static_cast<size_t>(y) * g_w + x] = 0;
+      }
    openMenu();
-   pick("transition", "split");
-   pick("option_split", "vertical");
-   CHECK(g_form.open);
-   ++g_revision; // the author edits the project while the window is open
+   change("transition", "wipe");
+   change("option", "left");
+   change("frames", "4");
+   change("placement", "after");
+   const Form::Field* source = fieldOf("source");
+   const Form::Field* pictures = fieldOf("preview");
+   const auto before = pictures ? pictures->images.front().pixels : std::vector<uint16_t>{};
+
+   // The author clicks frame 2 while the window is open.
+   g_current = 2;
+   fireEvent(CDMDPI_EVT_ON_SELECTION_CHANGED);
+   CHECK(source && source->label.find("frame 2") != std::string::npos);
+   CHECK(pictures && pictures->images.front().pixels != before);
+   CHECK(fieldOf("frames")->value == "4"); // the choices stay
+
+   // Then no frame: the window says so; Apply does nothing.
+   g_current = CDMDPI_NONE;
+   fireEvent(CDMDPI_EVT_ON_SELECTION_CHANGED);
+   CHECK(source && source->label.find("Select the frame") != std::string::npos);
+   CHECK(pictures && !pictures->visible);
+   g_current = 2;
+   fireEvent(CDMDPI_EVT_ON_SELECTION_CHANGED);
+   CHECK(pictures && pictures->visible);
+
+   // The project changes while the window is open: that is no reason to refuse any more.
+   ++g_revision;
+   fireEvent(CDMDPI_EVT_ON_PROJECT_CHANGED);
    closeForm(true);
-   CHECK(g_frames.size() == 2);
-   CHECK(g_messages.size() == 1 && g_messages[0].find("changed") != std::string::npos);
+   CHECK(g_frames.size() == 7 && g_messages.empty());
+   CHECK((g_shown == std::vector<uint32_t>{3, 4, 5, 6}));
+   CHECK(g_frames[3].original != g_frames[0].original);
+   // Events after the window closed change nothing.
+   const size_t updates = static_cast<size_t>(g_fieldUpdates);
+   fireEvent(CDMDPI_EVT_ON_SELECTION_CHANGED);
+   CHECK(static_cast<size_t>(g_fieldUpdates) == updates);
 }
 
 void testNoFrameSelected()
@@ -1234,6 +1569,18 @@ void testNoFrameSelected()
    CHECK(g_messages.size() == 1);
 }
 
+void testOneWindowAtATime()
+{
+   resetProject(128, 32, false);
+   openMenu();
+   openMenu(); // the menu again while the window is open: nothing new
+   CHECK(g_formsOpened == 1 && g_messages.empty());
+   closeForm(false);
+   openMenu();
+   CHECK(g_formsOpened == 2);
+   closeForm(false);
+}
+
 void testAllBlackFrameCannotFadeToBlack()
 {
    resetProject(128, 32, false);
@@ -1243,9 +1590,12 @@ void testAllBlackFrameCannotFadeToBlack()
       std::fill(f.sd.begin(), f.sd.end(), 0);
    }
    openMenu();
-   pick("transition", "fade");
-   pick("option_fade", "black");
-   CHECK(!g_form.open);
+   change("transition", "fade");
+   change("option", "black");
+   const Form::Field* f = fieldOf("frames");
+   CHECK(f && (choiceValues(*f) == std::vector<std::string>{"0"}) && f->help.find("nothing") != std::string::npos);
+   CHECK(fieldOf("preview") && !fieldOf("preview")->visible);
+   closeForm(true);
    CHECK(g_messages.size() == 1);
    CHECK(g_frames.size() == 2);
 }
@@ -1259,22 +1609,6 @@ void testBackgroundCaveat()
    CHECK(g_messages.size() == 1 && g_messages[0].find("background") != std::string::npos);
 }
 
-void testPicturesCanBeSwitchedOff()
-{
-   resetProject(128, 32, false);
-   g_settings["pictures"] = "0";
-   openMenu();
-   size_t notes = 0;
-   for (const auto& f : g_form.fields)
-      notes += f.kind == CDMDPI_FIELD_NOTE;
-   CHECK(notes == 1); // only the intro
-   pick("transition", "slide");
-   notes = 0;
-   for (const auto& f : g_form.fields)
-      notes += f.kind == CDMDPI_FIELD_NOTE;
-   CHECK(notes == 1); // only the description
-}
-
 void testNoRepeatedFramesInThePlugin()
 {
    // Every frame count the window offers gives all-different frames: the maximum of two
@@ -1283,17 +1617,17 @@ void testNoRepeatedFramesInThePlugin()
    {
       resetProject(128, 32, false);
       openMenu();
-      pick("transition", "split");
-      pick("option_split", option);
+      change("transition", "split");
+      change("option", option);
       const Form::Field* f = fieldOf("frames");
       const long most = f ? static_cast<long>(choiceValues(*f).size()) : 0;
-      g_settings["frames"] = std::to_string(most);
-      g_settings["placement"] = "end";
+      change("frames", std::to_string(most));
+      change("placement", "end");
       closeForm(true);
       CHECK(g_frames.size() == static_cast<size_t>(2 + most));
       std::set<std::vector<uint8_t>> seen;
       for (size_t i = 2; i < g_frames.size(); ++i)
-         seen.insert(g_frames[i].sd.empty() ? g_frames[i].original : std::vector<uint8_t>(g_frames[i].original));
+         seen.insert(g_frames[i].original);
       CHECK(seen.size() == static_cast<size_t>(most));
    }
 }
@@ -1345,9 +1679,9 @@ void testPlacementAfterTheSource()
    resetProject(128, 32, false);
    mark(1, 7);
    openMenu();
-   pick("transition", "fade");
-   pick("option_fade", "black");
-   g_settings["frames"] = "3";
+   change("transition", "fade");
+   change("option", "black");
+   change("frames", "3");
    closeForm(true);
    CHECK(g_frames.size() == 5 && g_frames[4].background == 7);
 }
@@ -1374,43 +1708,73 @@ void testRefusedMoveRollsBack()
    CHECK(g_status.empty());
 }
 
-void testBackTickBox()
+void testScene()
 {
+   // The new frames become a scene that the starting frame starts; the plain frames go again.
+   resetProject(128, 32, true);
+   mark(1, 7);
+   openMenu();
+   change("transition", "slide");
+   change("option", "up");
+   change("frames", "5");
+   change("placement", "scene");
+   change("duration", "40");
+   closeForm(true);
+   CHECK(g_endEditApplied == 1 && g_messages.empty());
+   CHECK(g_scenes.size() == 1);
+   if (g_scenes.size() == 1)
+   {
+      const Scene& scene = g_scenes[0];
+      CHECK(scene.id == 50000 && scene.frames == 5 && scene.durationMs == 40);
+      CHECK(scene.name == "Slide (Up)" && scene.repeat == 0 && scene.finish == CDMDPI_SCENE_KEEP_LAST &&
+            scene.flags == 0);
+   }
+   CHECK(g_frames.size() == 7);
+   CHECK(g_frames[0].startsScene == 50000 && g_frames[1].background == 7);
+   for (size_t i = 2; i < g_frames.size(); ++i)
+      CHECK(g_frames[i].inScene == 50000);
+   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4, 5, 6}));
+   CHECK(litPixels(g_frames[6]) < litPixels(g_frames[2]));
+   CHECK(g_status.size() == 1 && g_status[0].find("as scene 50000") != std::string::npos);
+   CHECK(g_settings["duration"] == "40");
+
+   // A refused scene takes everything back.
+   resetProject(128, 32, false);
+   g_refuseScene = true;
+   runFlow("wipe", "left", 3, "scene");
+   CHECK(g_frames.size() == 2 && g_scenes.empty() && g_endEditApplied == 0);
+   CHECK(g_messages.size() == 1 && g_messages[0].find("Nothing was changed") != std::string::npos);
+
+   // A duration that is no number is refused before anything is made.
    resetProject(128, 32, false);
    openMenu();
-   CHECK(fieldOf("back") == nullptr); // the first window has nothing to go back to
-   pick("transition", "slide");
-   // Window 2 has the tick box; ticked, "Next" goes back to window 1 with the choice kept.
-   const Form::Field* b = fieldOf("back");
-   CHECK(b && b->kind == CDMDPI_FIELD_CHECKBOX && b->def == "0");
-   g_settings["back"] = "1";
+   change("placement", "scene");
+   change("duration", "fast");
    closeForm(true);
-   CHECK(g_form.open && g_form.accept == "Next" && fieldOf("transition") != nullptr);
-   CHECK(g_settings["transition"] == "slide" && g_settings["back"] == "0");
-   // Forward again, with the tick box clear.
-   pick("transition", "wipe");
-   CHECK(g_form.open && fieldOf("option_wipe") != nullptr);
-   pick("option_wipe", "down");
-   // Window 3: ticked, "Apply" goes back to window 2, and nothing is made.
-   CHECK(g_form.open && g_form.accept == "Apply" && fieldOf("back") != nullptr);
-   g_settings["back"] = "1";
-   closeForm(true);
-   CHECK(g_form.open && g_form.accept == "Next" && fieldOf("option_wipe") != nullptr);
-   CHECK(g_frames.size() == 2 && g_endEditApplied == 0);
-   CHECK(g_settings["option_wipe"] == "down" && g_settings["back"] == "0");
-   // On again, to the end: now the frames are made.
-   pick("option_wipe", "down");
-   g_settings["placement"] = "end";
-   closeForm(true);
-   CHECK(g_frames.size() == 12 && g_endEditApplied == 1);
-   // A stale tick from an earlier visit does not take the next window back.
+   CHECK(g_frames.size() == 2 && g_messages.size() == 1 && g_messages[0].find("duration") != std::string::npos);
+
+   // The duration starts as the frame's own.
    resetProject(128, 32, false);
-   g_settings["back"] = "1";
+   g_frames[0].durationMs = 80;
    openMenu();
-   pick("transition", "slide");
-   CHECK(g_settings["back"] == "0");
-   pick("option_slide", "up");
-   CHECK(g_form.open && g_form.accept == "Apply");
+   CHECK(fieldOf("duration") && fieldOf("duration")->value == "80");
+   closeForm(false);
+
+   // A frame that started another scene starts the new one, and the author hears of it.
+   resetProject(128, 32, false);
+   g_scenes.push_back({50000, "Old", 33, 0, 0, 0, 0});
+   g_frames[0].startsScene = 50000;
+   runFlow("dissolve", "orderly", 2, "scene");
+   CHECK(g_scenes.size() == 2 && g_scenes[1].id == 50001 && g_frames[0].startsScene == 50001);
+   CHECK(g_messages.size() == 1 && g_messages[0].find("scene 50000") != std::string::npos);
+
+   // Scenes need 128 x 32: other projects are not offered them, and a saved choice falls back.
+   resetProject(192, 64, false);
+   g_settings["placement"] = "scene";
+   openMenu();
+   const Form::Field* place = fieldOf("placement");
+   CHECK(place && (choiceValues(*place) == std::vector<std::string>{"after", "end"}) && place->value == "after");
+   closeForm(false);
 }
 
 } // namespace
@@ -1420,6 +1784,7 @@ int main()
    setUpApi();
    TransitionBuilderPluginLoad(1, &g_bus);
    CHECK(g_menuCallback != nullptr);
+   CHECK(g_subscriptions.size() == 2);
 
    testRegistry();
    testBayerIsAPermutation();
@@ -1427,34 +1792,44 @@ int main()
    testDissolveSpecifics();
    testMovingSpecifics();
    testFadeSpecifics();
-   testIcons();
+   testPreviewSteps();
 
-   testWindowsOfTheFlow();
+   testTheWindow();
+   testTheWindowRemembers();
    testFramesListMatchesTheMaximum();
    testSavedFramesAreClamped();
    testCancelChangesNothing();
    testRefusalRollsBack();
-   testProjectChangedWhileWindowsAreOpen();
+   testTheWindowFollowsTheCurrentFrame();
    testNoFrameSelected();
+   testOneWindowAtATime();
    testAllBlackFrameCannotFadeToBlack();
    testBackgroundCaveat();
-   testPicturesCanBeSwitchedOff();
    testNoRepeatedFramesInThePlugin();
    testPlacementAfterTheSource();
    testPlacementAtTheEnd();
    testRefusedMoveRollsBack();
-   testBackTickBox();
-   // Every transition through the windows, on the sizes of real projects (single plane at the
+   testScene();
+   // Every transition through the window, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};
    for (const auto& sz : sizes)
    {
-      testEveryTransitionThroughTheWindows(sz[0], sz[1], false);
-      testEveryTransitionThroughTheWindows(sz[0], sz[1], true);
+      testEveryTransitionThroughTheWindow(sz[0], sz[1], false);
+      testEveryTransitionThroughTheWindow(sz[0], sz[1], true);
    }
 
+   // Unloading closes an open window and ends the subscriptions.
+   resetProject(128, 32, false);
+   openMenu();
    TransitionBuilderPluginUnload();
-   CHECK(g_menuCallback == nullptr);
+   CHECK(g_menuCallback == nullptr && !g_form.open && g_subscriptions.empty());
+
+   // An editor before version 9 gets no menu entry.
+   g_api.version = 8;
+   TransitionBuilderPluginLoad(1, &g_bus);
+   CHECK(g_menuCallback == nullptr && g_subscriptions.empty());
+   TransitionBuilderPluginUnload();
 
    if (g_failures)
    {
