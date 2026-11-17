@@ -2,7 +2,7 @@
 
 A plugin for the PPUC Colorizing DMD editor (the Serum editor). It builds transitions for you on
 new frames, or as a scene, from a frame of your project. It needs the editor's plugin API version
-9 (PPUC Colorizing DMD 3.99.39 or later).
+10 (PPUC Colorizing DMD 3.99.40 or later).
 
 ![The transitions, halfway through: white is the picture, black is what the transition has taken away](docs/transitions.png)
 
@@ -39,8 +39,7 @@ step from black (white).
 3. Click `Apply`. `Cancel` changes nothing.
 
 The transition, its option, what it goes to (black or white) and the placement are radio buttons,
-so one click chooses (plugin API version 10, PPUC Colorizing DMD 3.99.40 or later); an older editor
-shows drop-down lists.
+so one click chooses.
 
 The window does not block the editor. While it is open you can click another frame in the frame
 list: the window then starts from that frame, and the preview shows it. The window opens on the

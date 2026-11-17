@@ -1870,18 +1870,8 @@ int main()
    TransitionFXPluginUnload();
    CHECK(g_menuCallback == nullptr && !g_form.open && g_subscriptions.empty());
 
-   // An editor of version 9 shows drop-down lists instead of radio buttons.
+   // An editor before version 10 gets no menu entry.
    g_api.version = 9;
-   TransitionFXPluginLoad(1, &g_bus);
-   resetProject(128, 32, false);
-   openMenu();
-   CHECK(g_form.open && fieldOf("transition") && fieldOf("transition")->kind == CDMDPI_FIELD_CHOICE &&
-         fieldOf("target") && fieldOf("target")->kind == CDMDPI_FIELD_CHOICE && fieldOf("placement") &&
-         fieldOf("placement")->kind == CDMDPI_FIELD_CHOICE);
-   TransitionFXPluginUnload();
-
-   // An editor before version 9 gets no menu entry.
-   g_api.version = 8;
    TransitionFXPluginLoad(1, &g_bus);
    CHECK(g_menuCallback == nullptr && g_subscriptions.empty());
    TransitionFXPluginUnload();
