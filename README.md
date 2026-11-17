@@ -32,8 +32,8 @@ step from black (white).
    - **Number of frames:** the list holds only the numbers that work for that transition on your
      frame (see below), so there is nothing to mistype. A number you chose stays chosen while
      the transition can make that many frames.
-   - **Place the new frames:** right after the starting frame, at the end of the project, or as a
-     scene that the starting frame starts (see "As a scene" below).
+   - **Place the new frames:** immediately after the starting frame, at the end of the project, or
+     as a scene that the starting frame starts (see "As a scene" below).
    - **Preview:** four frames of the transition, drawn from your frame exactly as `Apply` will
      make them.
 3. Click `Apply`. `Cancel` changes nothing.
@@ -71,9 +71,9 @@ applies to all selected frames. (The editor's plugin API cannot set a frame's du
 ### As a scene
 
 `As a scene that the starting frame starts` is offered in projects of 128 x 32 frames (libserum
-plays scenes in no other). The plugin makes the frames as above, makes a scene of them behind the
-last frame of the project, lets the starting frame start it (its Scene field), and removes the
-plain frames again. The window then also asks for the scene's **frame duration** in milliseconds;
+plays scenes in no other). The plugin makes the frames as above, makes a scene of them, lets the
+starting frame start it (its Scene field), removes the plain frames again and puts the scene's
+frames immediately after the starting frame. The window then also asks for the scene's **frame duration** in milliseconds;
 it starts as the duration of your frame. The scene's other settings are the editor's defaults
 (played once, keeps its last frame, no flags); change them in the editor's Scenes section. If the
 starting frame started another scene before, it starts the new one now, and the plugin tells you.

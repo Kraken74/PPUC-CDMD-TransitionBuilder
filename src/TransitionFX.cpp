@@ -50,6 +50,8 @@ constexpr const char* kFieldTransition = "transition";
 constexpr const char* kFieldOption = "option";
 constexpr const char* kFieldTarget = "target"; // "black" or "white": what the transition goes to
 constexpr const char* kFieldFrames = "frames";
+// A note that draws a thin line between the groups of fields (a note starting with a tag is HTML).
+constexpr const char* kSeparator = "<hr>";
 constexpr const char* kFieldPlacement = "placement"; // "after", "end" or "scene"
 constexpr const char* kFieldDuration = "duration";   // the scene's frame duration
 constexpr const char* kFieldPreview = "preview";
@@ -392,6 +394,15 @@ std::string createTransition(const Request& request, Result& result)
       for (uint32_t i = 0; i < created.size(); ++i)
          created[i] = first + i;
       result.sceneId = sceneId;
+      // The scene's frames lie behind the last frame of the project; move them to just behind
+      // the starting frame, as the plain frames go (nothing to do when they already are there).
+      if (created.front() != source.frame + 1)
+      {
+         if (!g_editor->MoveFrames(g_endpoint, created.data(), static_cast<uint32_t>(created.size()), source.frame + 1))
+            return fail("The editor refused to move the scene's frames behind the starting frame.");
+         for (uint32_t i = 0; i < created.size(); ++i)
+            created[i] = source.frame + 1 + i;
+      }
    }
    // Right after the starting frame: the new frames were appended, so move them as one block to
    // just behind it (nothing to do when they already are there).
@@ -440,7 +451,7 @@ std::string optionChoices(const transitions::Transition& transition)
 
 std::string placementChoices(bool scenes)
 {
-   std::string choices = "after=Right after the starting frame\nend=At the end of the project";
+   std::string choices = "after=Immediately after the starting frame\nend=At the end of the project";
    if (scenes)
       choices += "\nscene=As a scene that the starting frame starts";
    return choices;
@@ -790,10 +801,13 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_RADIO,
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
+      {"sep1", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO, g_window.toWhite ? "white" : "black",
        "black=Black\nwhite=White", nullptr, 0, nullptr, 0},
+      {"sep2", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
+      {"sep3", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_RADIO, placement.c_str(), placements.c_str(),
        "A scene is made of the new frames, and the starting frame starts it. Scenes need a project of "
        "128 x 32 frames.",
@@ -802,6 +816,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
        "How long each frame of the scene shows. The other settings of the scene are the editor's defaults; "
        "change them in the Scenes section.",
        placement == "scene" ? 0u : CDMDPI_FORM_HIDDEN, nullptr, 0},
+      {"sep4", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldPreview, "Preview", CDMDPI_FIELD_IMAGE, nullptr, nullptr, nullptr,
        pictures.images.empty() ? CDMDPI_FORM_HIDDEN : 0u, pictures.images.data(),
        static_cast<uint32_t>(pictures.images.size())},

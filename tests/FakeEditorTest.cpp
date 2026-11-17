@@ -1775,11 +1775,13 @@ void testScene()
             scene.flags == 0);
    }
    CHECK(g_frames.size() == 7);
-   CHECK(g_frames[0].startsScene == 50000 && g_frames[1].background == 7);
-   for (size_t i = 2; i < g_frames.size(); ++i)
+   // The scene's frames lie right behind the starting frame; the project's other frame follows.
+   CHECK(g_frames[0].startsScene == 50000 && g_frames[6].background == 7 && g_frames[6].inScene == CDMDPI_NONE);
+   CHECK(g_frames[0].inScene == CDMDPI_NONE);
+   for (size_t i = 1; i <= 5; ++i)
       CHECK(g_frames[i].inScene == 50000);
-   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4, 5, 6}));
-   CHECK(litPixels(g_frames[6]) < litPixels(g_frames[2]));
+   CHECK((g_shown == std::vector<uint32_t>{1, 2, 3, 4, 5}));
+   CHECK(litPixels(g_frames[5]) < litPixels(g_frames[1]));
    CHECK(g_status.size() == 1 && g_status[0].find("as scene 50000") != std::string::npos);
    CHECK(g_settings["duration"] == "40");
 
