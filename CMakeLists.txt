@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TransitionBuilder VERSION 0.1 LANGUAGES CXX)
+project(TransitionBuilder VERSION 0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,10 @@ set_target_properties(plugin-transitionbuilder PROPERTIES PREFIX "")
 if(WIN32)
   # The name plugin.cfg gives for windows.x64.
   set_target_properties(plugin-transitionbuilder PROPERTIES OUTPUT_NAME "plugin-transitionbuilder64")
+endif()
+if(APPLE)
+  # The name plugin.cfg gives for macos (a CMake module is a .so there otherwise).
+  set_target_properties(plugin-transitionbuilder PROPERTIES SUFFIX ".dylib")
 endif()
 if(MINGW)
   target_link_options(plugin-transitionbuilder PRIVATE -static -static-libgcc -static-libstdc++)

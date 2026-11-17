@@ -1,7 +1,8 @@
 # Transition Builder
 
 A plugin for the PPUC Colorizing DMD editor (the Serum editor). It builds transitions for you on
-new frames at the end of your project.
+new frames, or as a scene, from a frame of your project. It needs the editor's plugin API version
+9 (PPUC Colorizing DMD 3.99.39 or later).
 
 ![The transitions, halfway through: white is the picture, black is what the transition has taken away](docs/transitions.png)
 
@@ -22,31 +23,33 @@ step from black (white).
 ## How to use it
 
 1. Open your project and select the frame you want to start the transition from.
-2. Choose `Plugins -> Transition Builder...`.
-3. **Window 1:** pick the transition and click `Next`.
-4. **Window 2:** pick the option (the direction, the dissolve type ...) and click `Next`.
-5. **Window 3:** pick the number of frames, where to put them, and click `Apply`. The list of
-   numbers holds only those that work for that transition on your frame (see below), so there is
-   nothing to mistype. The new frames go **right after the starting frame** or **at the end of
-   the project**, as you choose.
+2. Choose `Plugins -> Transition Builder...`. One window opens:
+   - **Transition:** the transition. The next field changes with it.
+   - **Option:** the transition's direction, dissolve type ... Its name and its list depend on the
+     transition. The window remembers the option of each transition.
+   - **Number of frames:** the list holds only the numbers that work for that transition on your
+     frame (see below), so there is nothing to mistype. A number you chose stays chosen while
+     the transition can make that many frames.
+   - **Place the new frames:** right after the starting frame, at the end of the project, or as a
+     scene that the starting frame starts (see "As a scene" below).
+   - **Preview:** four frames of the transition, drawn from your frame exactly as `Apply` will
+     make them.
+3. Click `Apply`. `Cancel` changes nothing.
 
-Windows 2 and 3 have a tick box, `Go back to the previous window`. Tick it and click the button
-to go back one window instead of on; your choices are kept. (The editor's windows have only one
-button besides `Cancel`, so a real `Back` button is not possible.)
-
-Every window has `Cancel`; nothing is changed until `Apply`.
-
-The editor's windows cannot change one field when another changes, which is why this is three
-short windows rather than one: what you can choose next depends on what you chose before.
+The window does not block the editor. While it is open you can click another frame in the frame
+list: the window then starts from that frame, and the preview shows it. The window opens on the
+choices you applied last.
 
 ### Why the number of frames is limited
 
 Every frame of a transition has to differ from the others. A slide moves whole pixels, so a
 frame 32 pixels tall can only be in so many places; blinds can only grow as wide as the gap
 between them. Each transition therefore has a most for the size of your frame, and the list in
-window 3 stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Horizontal 15.
+the window stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Horizontal 15.
 Larger frames (192 x 64, 256 x 64) allow more. A fade is limited by how many brightness levels
 the picture has.
+
+### What Apply makes
 
 The plugin adds that many new frames. Each new frame is a copy of
 the frame you started from, one step further along the transition than the one before. The new
@@ -60,11 +63,18 @@ copied; its shape mode is). They keep the frame's display time. To change it, us
 `Duration` field in the Frame section: the plugin leaves the new frames selected, and `Duration`
 applies to all selected frames. (The editor's plugin API cannot set a frame's duration.)
 
-### The pictures
+### As a scene
 
-Windows 1 and 2 show small pictures of the transitions (white is the picture, black is what the
-transition has taken away). If they do not look right on your computer, remove the tick at
-`Show pictures of the transitions` in window 1.
+`As a scene that the starting frame starts` is offered in projects of 128 x 32 frames (libserum
+plays scenes in no other). The plugin makes the frames as above, makes a scene of them behind the
+last frame of the project, lets the starting frame start it (its Scene field), and removes the
+plain frames again. The window then also asks for the scene's **frame duration** in milliseconds;
+it starts as the duration of your frame. The scene's other settings are the editor's defaults
+(played once, keeps its last frame, no flags); change them in the editor's Scenes section. If the
+starting frame started another scene before, it starts the new one now, and the plugin tells you.
+A frame of a scene has no dynamic zones, so the scene's frames have none.
+
+All of it, frames and scene, is one step of the editor's history.
 
 ## Installing it
 
@@ -92,13 +102,6 @@ GitHub builds it for you:
 4. When the run is green, open it and download `TransitionBuilder-windows-x64` under
    `Artifacts`. Unpack it: it holds the `TransitionBuilder` folder from the steps above.
 
-The new frames have **no comparison mask** (the mask of the frame you started from is not
-copied; its shape mode is). They keep the frame's display time.
-
-To change the display time of the new frames, use the editor's `Duration` field in the Frame
-section: the plugin leaves the new frames selected, and `Duration` applies to all selected
-frames. (The editor's plugin API cannot set a frame's duration, so the plugin has no box for it.)
-
 ## What it does not do (yet)
 
 - It starts from the **current frame** only, and the transition always goes to black (or white).
@@ -111,24 +114,24 @@ frames. (The editor's plugin API cannot set a frame's duration, so the plugin ha
   out of the dynamic zones. In moving transitions the dynamic zones move with the picture.
 - **Fade:** the colors of the picture and the frame's dynamic colors fade. Color rotations of the
   new frames are removed (they would keep turning the colors at full brightness).
-- The new frames are plain frames. Turning them into a scene is done in the editor as usual.
 
 ## Adding another transition
 
 Everything about a transition is in `src/Transitions.h`. A transition is a class (an `Effect`)
 that answers, for a pixel (x, y) of the new frame at step N of M: which pixel of the starting
 frame does it show, or is it black? It also says its most frames (`maxSteps`). Add one entry to
-`kTransitions` (with its options) and it appears in the windows. Nothing else changes: the same
-answers are used for the original shades, the pictures and the dynamic zones. The pictures in the
-windows are drawn from the effect itself (`src/Preview.h`).
+`kTransitions` (with its options) and it appears in the window. Nothing else changes: the same
+answers are used for the original shades, the pictures, the dynamic zones and the preview
+(`src/Preview.h`).
 
 ## Files
 
 - `plugin.cfg`: what the editor reads to find the plugin.
-- `src/TransitionBuilder.cpp`: the plugin (menu entry, the three windows, creating the frames).
-- `src/Preview.h`: the small pictures of the transitions.
+- `src/TransitionBuilder.cpp`: the plugin (menu entry, the window, creating the frames and the
+  scene).
+- `src/Preview.h`: drawing the steps of a transition, for the new frames and the preview.
 - `src/Transitions.h`: the transitions.
-- `include/`: the editor's plugin API (`ColorizingDMDPlugin.h`, version 8, from
+- `include/`: the editor's plugin API (`ColorizingDMDPlugin.h`, version 9, from
   PPUC-Colorizing-DMD) and the VPX plugin SDK header (`plugins/MsgPlugin.h`).
 - `tests/`: tests that run the plugin against a fake editor.
 
