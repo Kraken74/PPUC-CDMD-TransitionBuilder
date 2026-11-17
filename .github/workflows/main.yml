@@ -22,11 +22,11 @@ jobs:
       - name: Upload the plugin
         uses: actions/upload-artifact@v4
         with:
-          name: TransitionBuilder-windows-x64
+          name: TransitionFX-windows-x64
           path: dist
 
       - name: Build the tests
-        run: cmake -S . -B build-tests -A x64 -DTRANSITIONBUILDER_TESTS=ON && cmake --build build-tests --config Release
+        run: cmake -S . -B build-tests -A x64 -DTRANSITIONFX_TESTS=ON && cmake --build build-tests --config Release
 
       - name: Run the tests
         run: ctest --test-dir build-tests -C Release --output-on-failure

@@ -1,6 +1,6 @@
 // license:GPLv3+
 //
-// The transitions of the Transition Builder plugin.
+// The transitions of the TransitionFX plugin.
 //
 // A transition is an Effect. For every pixel of the new frame it answers "where does this pixel
 // come from?": a pixel of the starting frame, or black. The plugin asks that on the original
@@ -48,6 +48,7 @@ struct SourceInfo
    uint32_t brightestShade = 0;   // the brightest and the darkest shade the original uses
    uint32_t darkestShade = 0;
    std::vector<uint16_t> colors;  // the distinct RGB565 colors of the colorized pictures
+   bool toWhite = false;          // the transition goes to white instead of black (what a fade needs to know)
 };
 
 class Effect
@@ -571,9 +572,6 @@ inline bool same(const char* a, const char* b) { return std::string_view(a) == s
 inline std::unique_ptr<Effect> makeDissolve(const char* option, const SourceInfo& s)
 {
    if (same(option, "random")) return std::make_unique<RankDissolve>(Order::Random, s.width, s.height);
-   if (same(option, "centre_out")) return std::make_unique<RankDissolve>(Order::CentreOut, s.width, s.height);
-   if (same(option, "edge_in")) return std::make_unique<RankDissolve>(Order::EdgeIn, s.width, s.height);
-   if (same(option, "spiral")) return std::make_unique<RankDissolve>(Order::Spiral, s.width, s.height);
    return std::make_unique<OrderlyDissolve>(s.width, s.height);
 }
 
@@ -591,15 +589,20 @@ inline std::unique_ptr<Effect> makeSlide(const char* option, const SourceInfo& s
 }
 inline std::unique_ptr<Effect> makeWipe(const char* option, const SourceInfo& s)
 {
+   // A wipe is a bar that moves across the picture, or a shape that grows from the centre, closes
+   // in from the edges or winds along a spiral.
+   if (same(option, "centre_out")) return std::make_unique<RankDissolve>(Order::CentreOut, s.width, s.height);
+   if (same(option, "edge_in")) return std::make_unique<RankDissolve>(Order::EdgeIn, s.width, s.height);
+   if (same(option, "spiral")) return std::make_unique<RankDissolve>(Order::Spiral, s.width, s.height);
    return std::make_unique<Wipe>(directionOf(option), s.width, s.height);
 }
 inline std::unique_ptr<Effect> makeBlinds(const char* option, const SourceInfo& s)
 {
    return std::make_unique<Blinds>(!same(option, "vertical"), s.width, s.height);
 }
-inline std::unique_ptr<Effect> makeFade(const char* option, const SourceInfo& s)
+inline std::unique_ptr<Effect> makeFade(const char*, const SourceInfo& s)
 {
-   return std::make_unique<Fade>(same(option, "white"), s);
+   return std::make_unique<Fade>(s.toWhite, s);
 }
 inline std::unique_ptr<Effect> makeAlternatingSlide(const char* option, const SourceInfo& s)
 {
@@ -613,8 +616,7 @@ inline std::unique_ptr<Effect> makeSplit(const char* option, const SourceInfo& s
 }
 
 inline const Option kDissolveOptions[] = {
-   {"orderly", "Orderly"}, {"random", "Random"}, {"centre_out", "Centre-Out"},
-   {"edge_in", "Edge-In"}, {"spiral", "Spiral"},
+   {"orderly", "Orderly"}, {"random", "Random"},
 };
 inline const Option kDirectionOptions[] = {
    {"up", "Up"}, {"down", "Down"}, {"left", "Left"}, {"right", "Right"},
@@ -622,8 +624,9 @@ inline const Option kDirectionOptions[] = {
 inline const Option kOrientationOptions[] = {
    {"horizontal", "Horizontal"}, {"vertical", "Vertical"},
 };
-inline const Option kFadeOptions[] = {
-   {"black", "To Black"}, {"white", "To White"},
+inline const Option kWipeOptions[] = {
+   {"up", "Up"}, {"down", "Down"}, {"left", "Left"}, {"right", "Right"},
+   {"centre_out", "Centre-Out"}, {"edge_in", "Edge-In"}, {"spiral", "Spiral"},
 };
 
 #define TB_COUNT(a) (sizeof(a) / sizeof((a)[0]))
@@ -635,21 +638,18 @@ inline const Transition kTransitions[] = {
     "4th, 6th ... column go down. A thin strip of each line is left at the end.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide},
    {"blinds", "Blinds",
-    "Black bars appear at regular intervals and grow wider until only thin slits of the "
-    "picture are left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by "
-    "side.",
+    "Bars appear at regular intervals and grow wider until only thin slits of the picture are "
+    "left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by side.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
    {"dissolve", "Dissolve",
-    "The picture dissolves to black. Orderly: pixels disappear in a regular pattern. Random: "
-    "pixels disappear at random. Centre-Out: they disappear from the centre outward. Edge-In: "
-    "they disappear from the outside edges inward. Spiral: they disappear along a spiral from "
-    "the top left corner.",
+    "The picture dissolves pixel by pixel. Orderly: pixels disappear in a regular pattern. "
+    "Random: pixels disappear at random.",
     "Dissolve Type", kDissolveOptions, TB_COUNT(kDissolveOptions), &makeDissolve},
    {"fade", "Fade",
-    "The picture gets darker or brighter at each step. The last frame is almost black (To "
-    "Black) or almost white (To White), but not quite. Color rotations of the new frames are "
+    "The picture gets darker (to black) or brighter (to white) at each step. The last frame is "
+    "almost black or almost white, but not quite. Color rotations of the new frames are "
     "removed, because they would not fade.",
-    "Fade To", kFadeOptions, TB_COUNT(kFadeOptions), &makeFade},
+    nullptr, nullptr, 0, &makeFade},
    {"slide", "Slide",
     "The whole picture slides off the screen in the direction you choose. A thin strip of it "
     "is left at the end.",
@@ -660,9 +660,11 @@ inline const Transition kTransitions[] = {
     "half down. Vertical: cut down, the left half slides left and the right half right.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
    {"wipe", "Wipe",
-    "A black bar wipes over the picture in the direction you choose (Left: it comes in from "
-    "the right edge and moves left). A thin strip of the picture is left at the end.",
-    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeWipe},
+    "A bar wipes over the picture in the direction you choose (Left: it comes in from the right "
+    "edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture "
+    "closes in from the outside edges. Spiral: a spiral winds in from the top left corner. A "
+    "little of the picture is left at the end.",
+    "Wipe Type", kWipeOptions, TB_COUNT(kWipeOptions), &makeWipe},
 };
 inline constexpr size_t kTransitionCount = 7;
 static_assert(sizeof(kTransitions) / sizeof(kTransitions[0]) == kTransitionCount, "update kTransitionCount");

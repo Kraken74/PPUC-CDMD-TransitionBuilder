@@ -1,4 +1,4 @@
-# Transition Builder
+# TransitionFX
 
 A plugin for the PPUC Colorizing DMD editor (the Serum editor). It builds transitions for you on
 new frames, or as a scene, from a frame of your project. It needs the editor's plugin API version
@@ -9,24 +9,26 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 | Transition | Options | What it does |
 | --- | --- | --- |
 | **Alternating Slide** | Horizontal, Vertical | Horizontal: the 1st, 3rd, 5th ... row slide left, the 2nd, 4th ... row slide right. Vertical: the 1st, 3rd ... column go up, the 2nd, 4th ... column go down. |
-| **Blinds** | Horizontal, Vertical | Black bars at regular intervals grow wider. |
-| **Dissolve** | Orderly, Random, Centre-Out, Edge-In, Spiral | Pixels turn black: in a regular pattern, at random, from the centre outward, from the edges inward, or along a spiral. |
-| **Fade** | To Black, To White | The picture gets darker (brighter) with every frame. |
+| **Blinds** | Horizontal, Vertical | Bars at regular intervals grow wider until only thin slits of the picture are left. |
+| **Dissolve** | Orderly, Random | Pixels disappear in a regular pattern, or at random. |
+| **Fade** | | The picture gets darker (to black) or brighter (to white) with every frame. |
 | **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
-| **Wipe** | Up, Down, Left, Right | A black bar wipes over the picture, moving in the direction you choose (Left: it comes in from the right edge). |
+| **Wipe** | Up, Down, Left, Right, Centre-Out, Edge-In, Spiral | A bar wipes over the picture in the direction you choose (Left: it comes in from the right edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture closes in from the outside edges. Spiral: a spiral winds in from the top left corner. |
 
-The last frame of a transition is never completely black (or white): a dissolve ends with a few
-pixels still lit, the sliding ones with a thin strip of the picture, a fade with a color one
+Every transition goes **to black or to white**: choose `Transition to` in the window. The last
+frame of a transition is never completely black (or white): a dissolve or a wipe ends with a few
+pixels of the picture left, the sliding ones with a thin strip of the picture, a fade with a color one
 step from black (white).
 
 ## How to use it
 
 1. Open your project and select the frame you want to start the transition from.
-2. Choose `Plugins -> Transition Builder...`. One window opens:
+2. Choose `Plugins -> TransitionFX...`. One window opens:
    - **Transition:** the transition. The next field changes with it.
    - **Option:** the transition's direction, dissolve type ... Its name and its list depend on the
      transition. The window remembers the option of each transition.
+   - **Transition to:** black or white.
    - **Number of frames:** the list holds only the numbers that work for that transition on your
      frame (see below), so there is nothing to mistype. A number you chose stays chosen while
      the transition can make that many frames.
@@ -78,14 +80,16 @@ All of it, frames and scene, is one step of the editor's history.
 
 ## Installing it
 
-1. Get the plugin folder `TransitionBuilder` (see "Getting the plugin" below). It contains
-   `plugin.cfg` and `plugin-transitionbuilder64.dll`.
+1. Get the plugin folder `TransitionFX` (see "Getting the plugin" below). It contains
+   `plugin.cfg` and `plugin-transitionfx64.dll`.
 2. In the editor, open `Settings -> Plugins` and click `Open Folder`. Put the whole
-   `TransitionBuilder` folder into that folder (usually
+   `TransitionFX` folder into that folder (usually
    `%APPDATA%\ppuc.org\PPUC Colorizing DMD\plugins`), so that `plugin.cfg` is at
-   `...\plugins\TransitionBuilder\plugin.cfg`.
-3. Restart the editor, open `Settings -> Plugins`, and check `Transition Builder`.
-4. A `Plugins` menu appears with the entry `Transition Builder...`.
+   `...\plugins\TransitionFX\plugin.cfg`.
+   If you used this plugin under its earlier name, **delete the old `TransitionBuilder` folder**
+   from the plugin folder first; the two would both appear in the `Plugins` menu.
+3. Restart the editor, open `Settings -> Plugins`, and check `TransitionFX`.
+4. A `Plugins` menu appears with the entry `TransitionFX...`.
 
 If the plugin does not load, `Settings -> Plugins` names the reason, and `Help -> Plugin Log`
 has more.
@@ -99,18 +103,18 @@ GitHub builds it for you:
    (`Add file -> Upload files`; drag the whole folder in).
 3. Open the repository's `Actions` tab. The `Build Windows plugin` run starts by itself after
    the upload (or choose it and click `Run workflow`).
-4. When the run is green, open it and download `TransitionBuilder-windows-x64` under
-   `Artifacts`. Unpack it: it holds the `TransitionBuilder` folder from the steps above.
+4. When the run is green, open it and download `TransitionFX-windows-x64` under
+   `Artifacts`. Unpack it: it holds the `TransitionFX` folder from the steps above.
 
 ## What it does not do (yet)
 
-- It starts from the **current frame** only, and the transition always goes to black (or white).
+- It starts from the **current frame** only, and the transition always goes to black or white.
   Transitions from one frame to another are planned.
 - It works on the original frame and the one colorized picture; with an HD plane the plugin
   moves it in 2x2 blocks, as the editor's HD plane works.
 - **Backgrounds:** where a frame shows its background, those pixels stay as they are, because the
   plugin API cannot change a frame's background mask. The plugin tells you when the frame has one.
-- Black pixels are black in the frame's original shades and in the pictures, and they are taken
+- Pixels a transition has taken away are black (or white) in the frame's original shades and in the pictures, and they are taken
   out of the dynamic zones. In moving transitions the dynamic zones move with the picture.
 - **Fade:** the colors of the picture and the frame's dynamic colors fade. Color rotations of the
   new frames are removed (they would keep turning the colors at full brightness).
@@ -119,7 +123,7 @@ GitHub builds it for you:
 
 Everything about a transition is in `src/Transitions.h`. A transition is a class (an `Effect`)
 that answers, for a pixel (x, y) of the new frame at step N of M: which pixel of the starting
-frame does it show, or is it black? It also says its most frames (`maxSteps`). Add one entry to
+frame does it show, or has it been taken away (black or white)? It also says its most frames (`maxSteps`). Add one entry to
 `kTransitions` (with its options) and it appears in the window. Nothing else changes: the same
 answers are used for the original shades, the pictures, the dynamic zones and the preview
 (`src/Preview.h`).
@@ -127,7 +131,7 @@ answers are used for the original shades, the pictures, the dynamic zones and th
 ## Files
 
 - `plugin.cfg`: what the editor reads to find the plugin.
-- `src/TransitionBuilder.cpp`: the plugin (menu entry, the window, creating the frames and the
+- `src/TransitionFX.cpp`: the plugin (menu entry, the window, creating the frames and the
   scene).
 - `src/Preview.h`: drawing the steps of a transition, for the new frames and the preview.
 - `src/Transitions.h`: the transitions.

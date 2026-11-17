@@ -1,6 +1,6 @@
 // license:GPLv3+
 //
-// Tests of the Transition Builder: the effects on their own (every transition, every option, on
+// Tests of the TransitionFX: the effects on their own (every transition, every option, on
 // several frame sizes), and the plugin against a fake editor that implements the part of the
 // editor API the plugin uses, with edit batches that can be taken back. The window is scripted
 // the way the author uses it: menu entry, then fields changed one by one, then Apply.
@@ -21,8 +21,8 @@
 #include "Transitions.h"
 #include "plugins/MsgPlugin.h"
 
-MSGPI_EXPORT void MSGPIAPI TransitionBuilderPluginLoad(const uint32_t, const MsgPluginAPI*);
-MSGPI_EXPORT void MSGPIAPI TransitionBuilderPluginUnload();
+MSGPI_EXPORT void MSGPIAPI TransitionFXPluginLoad(const uint32_t, const MsgPluginAPI*);
+MSGPI_EXPORT void MSGPIAPI TransitionFXPluginUnload();
 
 namespace {
 
@@ -731,7 +731,8 @@ void openMenu()
 
 // Runs the whole flow. option may be null for a transition without options; frames may be
 // negative to take whatever the window shows.
-bool runFlow(const char* transition, const char* option, long frames, const char* placement = "end")
+bool runFlow(const char* transition, const char* option, long frames, const char* placement = "end",
+             const char* target = "black")
 {
    openMenu();
    if (!g_form.open)
@@ -740,6 +741,7 @@ bool runFlow(const char* transition, const char* option, long frames, const char
    change("transition", transition);
    if (option)
       change("option", option);
+   change("target", target);
    if (frames >= 0)
       change("frames", std::to_string(frames));
    change("placement", placement);
@@ -752,28 +754,39 @@ struct Case
 {
    const transitions::Transition* transition;
    const transitions::Option* option; // null without options
+   bool toWhite = false;
    std::string name() const
    {
-      return std::string(transition->label) + (option ? std::string(" / ") + option->label : std::string());
+      return std::string(transition->label) + (option ? std::string(" / ") + option->label : std::string()) +
+             (toWhite ? " to white" : " to black");
    }
 };
 
-std::vector<Case> allCases()
+// Every transition with every option; a fade with both targets, the others (whose geometry does
+// not depend on the target) with both only when everyTarget is set.
+std::vector<Case> allCases(bool everyTarget = false)
 {
    std::vector<Case> cases;
    for (const auto& t : transitions::kTransitions)
    {
+      const bool both = everyTarget || transitions::same(t.id, "fade");
+      auto add = [&](const transitions::Option* option) {
+         cases.push_back({&t, option, false});
+         if (both)
+            cases.push_back({&t, option, true});
+      };
       if (t.optionCount == 0)
-         cases.push_back({&t, nullptr});
+         add(nullptr);
       for (size_t i = 0; i < t.optionCount; ++i)
-         cases.push_back({&t, &t.options[i]});
+         add(&t.options[i]);
    }
    return cases;
 }
 
-transitions::SourceInfo makeInfo(uint32_t w, uint32_t h)
+transitions::SourceInfo makeInfo(uint32_t w, uint32_t h, bool toWhite = false)
 {
    transitions::SourceInfo info;
+   info.toWhite = toWhite;
    info.width = w;
    info.height = h;
    info.colorCount = kColors;
@@ -787,7 +800,7 @@ transitions::SourceInfo makeInfo(uint32_t w, uint32_t h)
 
 std::unique_ptr<transitions::Effect> makeEffect(const Case& c, uint32_t w, uint32_t h)
 {
-   return c.transition->make(c.option ? c.option->id : "", makeInfo(w, h));
+   return c.transition->make(c.option ? c.option->id : "", makeInfo(w, h, c.toWhite));
 }
 
 bool isFade(const Case& c) { return transitions::same(c.transition->id, "fade"); }
@@ -978,7 +991,7 @@ void testDissolveSpecifics()
    // Centre-Out hides the pixels near the centre first, Edge-In the ones at the edges first.
    for (const char* kind : {"centre_out", "edge_in"})
    {
-      auto e = transitions::findTransition("dissolve")->make(kind, makeInfo(w, h));
+      auto e = transitions::findTransition("wipe")->make(kind, makeInfo(w, h));
       auto dist = [&](uint32_t x, uint32_t y) {
          const double dx = (x + 0.5 - w / 2.0) / (w / 2.0), dy = (y + 0.5 - h / 2.0) / (h / 2.0);
          return dx * dx + dy * dy;
@@ -1003,7 +1016,7 @@ void testDissolveSpecifics()
    }
    // Spiral: gone pixels stay gone, and the first ones to go are next to each other.
    {
-      auto e = transitions::findTransition("dissolve")->make("spiral", makeInfo(w, h));
+      auto e = transitions::findTransition("wipe")->make("spiral", makeInfo(w, h));
       for (uint32_t step = 1; step < 20; ++step)
          for (uint32_t y = 0; y < h; ++y)
             for (uint32_t x = 0; x < w; ++x)
@@ -1175,7 +1188,7 @@ void testFadeSpecifics()
    for (const char* o : {"black", "white"})
    {
       const bool toWhite = std::strcmp(o, "white") == 0;
-      auto e = transitions::findTransition("fade")->make(o, makeInfo(128, 32));
+      auto e = transitions::findTransition("fade")->make("", makeInfo(128, 32, toWhite));
       CHECK(e->changesColors());
       // Geometry never changes.
       auto r = e->rule(3, 4, 2, 5);
@@ -1212,7 +1225,7 @@ void testFadeSpecifics()
       black.colors = {0};
       black.brightestShade = black.darkestShade = 0;
       if (!toWhite)
-         CHECK(transitions::findTransition("fade")->make(o, black)->maxSteps() == 0);
+         CHECK(transitions::findTransition("fade")->make("", black)->maxSteps() == 0);
    }
 }
 
@@ -1259,12 +1272,12 @@ void checkNewFrames(size_t added, bool zones)
 
 void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
 {
-   for (const Case& c : allCases())
+   for (const Case& c : allCases(true))
    {
       resetProject(w, h, zones);
       g_frames[0].comparisonMask = 3; // the source has a mask; the new frames must not
       const uint32_t frames = 5;
-      if (!runFlow(c.transition->id, c.option ? c.option->id : nullptr, frames))
+      if (!runFlow(c.transition->id, c.option ? c.option->id : nullptr, frames, "end", c.toWhite ? "white" : "black"))
       {
          std::printf("flow failed for %s on %ux%u\n", c.name().c_str(), w, h);
          CHECK(false);
@@ -1291,16 +1304,34 @@ void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
       // its geometry and so is never all black either.
       const Frame& last = g_frames.back();
       CHECK(countShade(last.original, 0) < last.original.size() || isFade(c));
+      if (c.toWhite)
+      {
+         CHECK(std::count(last.sd.begin(), last.sd.end(), 0xFFFF) < static_cast<long>(last.sd.size()));
+         // what a transition takes away is exactly RGB565 white (a fade changes the colors instead)
+         if (!isFade(c))
+            CHECK(std::count(last.sd.begin(), last.sd.end(), 0xFFFF) > 0);
+      }
       CHECK(std::count(last.sd.begin(), last.sd.end(), 0) < static_cast<long>(last.sd.size()));
       // Black pixels in the original are black in the picture, too, and out of the zones.
       if (!isFade(c))
          for (size_t i = 2; i < g_frames.size(); ++i)
             for (size_t p = 0; p < g_frames[i].original.size(); ++p)
             {
-               const bool black = g_frames[i].sd[p] == 0;
-               CHECK(black == (g_frames[i].original[p] == 0));
-               if (zones && black)
-                  CHECK(g_frames[i].zones[p] == 255);
+               if (!c.toWhite)
+               {
+                  const bool black = g_frames[i].sd[p] == 0;
+                  CHECK(black == (g_frames[i].original[p] == 0));
+                  if (zones && black)
+                     CHECK(g_frames[i].zones[p] == 255);
+               }
+               else if (g_frames[i].sd[p] == 0xFFFF) // taken away: the brightest shade, in no zone
+               {
+                  CHECK(g_frames[i].original[p] == kColors - 1);
+                  if (zones)
+                     CHECK(g_frames[i].zones[p] == 255);
+               }
+               else
+                  CHECK(g_frames[i].sd[p] != 0);
             }
       if (isFade(c) && zones)
          for (size_t i = 2; i < g_frames.size(); ++i)
@@ -1340,12 +1371,20 @@ void testTheWindow()
    CHECK(o && o->kind == CDMDPI_FIELD_CHOICE && o->visible);
    if (o)
    {
-      const std::vector<std::string> want = {"orderly", "random", "centre_out", "edge_in", "spiral"};
+      const std::vector<std::string> want = {"orderly", "random"};
       CHECK(choiceValues(*o) == want);
       CHECK(o->label == "Dissolve Type" && o->value == "orderly");
-      CHECK(o->help.find("Spiral") != std::string::npos);
+      CHECK(o->help.find("Random") != std::string::npos);
    }
-   change("option", "spiral");
+   // What the transition goes to: black or white, for every transition.
+   const Form::Field* tg = fieldOf("target");
+   CHECK(tg && tg->kind == CDMDPI_FIELD_CHOICE && tg->label == "Transition to" && tg->value == "black");
+   if (tg)
+   {
+      const std::vector<std::string> want = {"black", "white"};
+      CHECK(choiceValues(*tg) == want);
+   }
+   change("option", "random");
 
    // The frames list: exactly 1 .. maxSteps, opened on 10.
    const Form::Field* f = fieldOf("frames");
@@ -1419,7 +1458,7 @@ void testTheWindowRemembers()
    // The next time the window opens on the same choices.
    openMenu();
    CHECK(fieldOf("transition") && fieldOf("transition")->value == "wipe");
-   CHECK(fieldOf("option") && fieldOf("option")->value == "down" && fieldOf("option")->label == "Direction");
+   CHECK(fieldOf("option") && fieldOf("option")->value == "down" && fieldOf("option")->label == "Wipe Type");
    CHECK(fieldOf("frames") && fieldOf("frames")->value == "4");
    CHECK(fieldOf("placement") && fieldOf("placement")->value == "end");
    // An option is remembered per transition.
@@ -1591,7 +1630,7 @@ void testAllBlackFrameCannotFadeToBlack()
    }
    openMenu();
    change("transition", "fade");
-   change("option", "black");
+   change("target", "black");
    const Form::Field* f = fieldOf("frames");
    CHECK(f && (choiceValues(*f) == std::vector<std::string>{"0"}) && f->help.find("nothing") != std::string::npos);
    CHECK(fieldOf("preview") && !fieldOf("preview")->visible);
@@ -1680,7 +1719,7 @@ void testPlacementAfterTheSource()
    mark(1, 7);
    openMenu();
    change("transition", "fade");
-   change("option", "black");
+   change("target", "black");
    change("frames", "3");
    closeForm(true);
    CHECK(g_frames.size() == 5 && g_frames[4].background == 7);
@@ -1726,7 +1765,7 @@ void testScene()
    {
       const Scene& scene = g_scenes[0];
       CHECK(scene.id == 50000 && scene.frames == 5 && scene.durationMs == 40);
-      CHECK(scene.name == "Slide (Up)" && scene.repeat == 0 && scene.finish == CDMDPI_SCENE_KEEP_LAST &&
+      CHECK(scene.name == "Slide (Up) to Black" && scene.repeat == 0 && scene.finish == CDMDPI_SCENE_KEEP_LAST &&
             scene.flags == 0);
    }
    CHECK(g_frames.size() == 7);
@@ -1782,7 +1821,7 @@ void testScene()
 int main()
 {
    setUpApi();
-   TransitionBuilderPluginLoad(1, &g_bus);
+   TransitionFXPluginLoad(1, &g_bus);
    CHECK(g_menuCallback != nullptr);
    CHECK(g_subscriptions.size() == 2);
 
@@ -1822,14 +1861,14 @@ int main()
    // Unloading closes an open window and ends the subscriptions.
    resetProject(128, 32, false);
    openMenu();
-   TransitionBuilderPluginUnload();
+   TransitionFXPluginUnload();
    CHECK(g_menuCallback == nullptr && !g_form.open && g_subscriptions.empty());
 
    // An editor before version 9 gets no menu entry.
    g_api.version = 8;
-   TransitionBuilderPluginLoad(1, &g_bus);
+   TransitionFXPluginLoad(1, &g_bus);
    CHECK(g_menuCallback == nullptr && g_subscriptions.empty());
-   TransitionBuilderPluginUnload();
+   TransitionFXPluginUnload();
 
    if (g_failures)
    {
