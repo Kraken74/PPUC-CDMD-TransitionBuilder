@@ -52,6 +52,9 @@ constexpr const char* kFieldTarget = "target"; // "black" or "white": what the t
 constexpr const char* kFieldFrames = "frames";
 // A note that draws a thin line between the groups of fields (a note starting with a tag is HTML).
 constexpr const char* kSeparator = "<hr>";
+// A blank line between the transition and its option; shown with the option only.
+constexpr const char* kFieldGap = "gap";
+constexpr const char* kGap = "<span>&nbsp;</span>";
 constexpr const char* kFieldPlacement = "placement"; // "after", "end" or "scene"
 constexpr const char* kFieldDuration = "duration";   // the scene's frame duration
 constexpr const char* kFieldPreview = "preview";
@@ -587,6 +590,7 @@ void updateOption()
       ColorizingDMDFormFieldUpdate change = changeOf(CDMDPI_FORM_SET_VISIBLE);
       change.visible = 0;
       update(kFieldOption, change);
+      update(kFieldGap, change);
       return;
    }
    g_window.option = transitions::findOption(transition, setting(optionKey(transition).c_str(), "").c_str());
@@ -601,6 +605,9 @@ void updateOption()
    change.value = g_window.option->id;
    change.help = help.c_str();
    update(kFieldOption, change);
+   ColorizingDMDFormFieldUpdate gap = changeOf(CDMDPI_FORM_SET_VISIBLE);
+   gap.visible = 1;
+   update(kFieldGap, gap);
 }
 
 void updateDuration()
@@ -797,6 +804,8 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
    const ColorizingDMDFormField fields[] = {
       {kFieldSource, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldTransition, "Transition", CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(), nullptr, 0,
+       nullptr, 0},
+      {kFieldGap, kGap, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
       {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_RADIO,
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,

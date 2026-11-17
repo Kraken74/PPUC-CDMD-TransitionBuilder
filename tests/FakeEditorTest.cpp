@@ -1375,6 +1375,12 @@ void testTheWindow()
    change("transition", "dissolve");
    const Form::Field* o = fieldOf("option");
    CHECK(o && o->kind == CDMDPI_FIELD_RADIO && o->visible);
+   // The blank line between the transition and its option shows with the option, not without.
+   CHECK(fieldOf("gap") && fieldOf("gap")->kind == CDMDPI_FIELD_NOTE && fieldOf("gap")->visible);
+   change("transition", "fade");
+   CHECK(fieldOf("option") && !fieldOf("option")->visible && fieldOf("gap") && !fieldOf("gap")->visible);
+   change("transition", "dissolve");
+   CHECK(fieldOf("gap") && fieldOf("gap")->visible);
    if (o)
    {
       const std::vector<std::string> want = {"orderly", "random"};
