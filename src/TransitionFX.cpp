@@ -2,7 +2,7 @@
 //
 // TransitionFX: a plugin for the PPUC Colorizing DMD editor.
 //
-// Plugins menu -> "TransitionFX...". One window (a live form of the editor API version 9)
+// Plugins menu -> "TransitionFX...". One window (a live form of the editor API version 10)
 // holds everything: the transition, its option (its direction, its type ...), the number of
 // frames, where the new frames go, and a preview of the transition on the author's own frame.
 // The fields follow each other while the author fills them in: the options belong to the
@@ -785,16 +785,16 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
 
    const ColorizingDMDFormField fields[] = {
       {kFieldSource, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTransition, "Transition", CDMDPI_FIELD_CHOICE, transition.id, transitionChoices.c_str(), nullptr, 0,
+      {kFieldTransition, "Transition", CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(), nullptr, 0,
        nullptr, 0},
-      {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_CHOICE,
+      {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_RADIO,
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
-      {kFieldTarget, "Transition to", CDMDPI_FIELD_CHOICE, g_window.toWhite ? "white" : "black",
+      {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO, g_window.toWhite ? "white" : "black",
        "black=Black\nwhite=White", nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
-      {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_CHOICE, placement.c_str(), placements.c_str(),
+      {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_RADIO, placement.c_str(), placements.c_str(),
        "A scene is made of the new frames, and the starting frame starts it. Scenes need a project of "
        "128 x 32 frames.",
        0, nullptr, 0},
@@ -834,10 +834,10 @@ MSGPI_EXPORT void MSGPIAPI TransitionFXPluginLoad(const uint32_t endpointId, con
    const ColorizingDMDEditorAPI* editor = nullptr;
    g_getApiId = g_msg->GetMsgID(CDMDPI_NAMESPACE, CDMDPI_MSG_GET_API);
    g_msg->BroadcastMsg(g_endpoint, g_getApiId, &editor);
-   if (!editor || editor->version < 9)
+   if (!editor || editor->version < 10)
    {
       // Not hosted by the PPUC Colorizing DMD editor, or by one too old for this plugin: it
-      // needs the live forms and scenes of version 9.
+      // needs the live forms and scenes of version 9 and the radio buttons of version 10.
       g_editor = nullptr;
       return;
    }
