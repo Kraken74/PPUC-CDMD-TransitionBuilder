@@ -23,9 +23,13 @@ namespace preview {
 template <class T, class Recolor>
 void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t width, uint32_t height,
                 uint32_t originalWidth, uint32_t originalHeight, const transitions::Effect& effect,
-                uint32_t step, uint32_t steps, T black, Recolor recolor)
+                uint32_t step, uint32_t steps, T black, Recolor recolor, const std::vector<T>* under = nullptr)
 {
    out.assign(source.size(), black);
+   // The pixels that show nothing of the source show the picture underneath (the other frame of
+   // a transition to another frame), in the same place, when there is one.
+   if (under && under->size() == source.size())
+      out = *under;
    for (uint32_t y = 0; y < height; ++y)
       for (uint32_t x = 0; x < width; ++x)
       {
@@ -44,6 +48,40 @@ void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t widt
          out[static_cast<size_t>(y) * width + x] = recolor(source[static_cast<size_t>(sourceY) * width + sourceX]);
       }
 }
+
+// The picture of one step of a cross-fade: every pixel blends from the source toward the picture
+// underneath by the effect's weight.
+template <class T, class Mix>
+void renderCross(const std::vector<T>& source, const std::vector<T>& under, std::vector<T>& out,
+                 const transitions::Effect& effect, uint32_t step, uint32_t steps, Mix mix)
+{
+   const uint32_t weight = effect.weight(step, steps);
+   out.resize(source.size());
+   for (size_t i = 0; i < source.size(); ++i)
+      out[i] = i < under.size() ? mix(source[i], under[i], weight) : source[i];
+}
+
+// Blends two RGB565 colors (weight of b: 0 .. 65536), each channel on its own.
+inline uint16_t mixColor(uint16_t a, uint16_t b, uint32_t weight)
+{
+   auto channel = [&](int x, int y) {
+      return static_cast<uint32_t>(x + static_cast<int>((static_cast<int64_t>(y - x) * weight + 32768) >> 16));
+   };
+   const uint32_t r = channel((a >> 11) & 31, (b >> 11) & 31);
+   const uint32_t g = channel((a >> 5) & 63, (b >> 5) & 63);
+   const uint32_t bl = channel(a & 31, b & 31);
+   return static_cast<uint16_t>((r << 11) | (g << 5) | bl);
+}
+
+// Blends two shades (weight of b: 0 .. 65536).
+inline uint8_t mixShade(uint8_t a, uint8_t b, uint32_t weight)
+{
+   return static_cast<uint8_t>(a + static_cast<int>(((static_cast<int64_t>(b) - a) * weight + 32768) >> 16));
+}
+
+// Zones cannot blend: a pixel is in the zone of the starting frame until the halfway point, then
+// in that of the other frame.
+inline uint8_t mixZone(uint8_t a, uint8_t b, uint32_t weight) { return weight < 32768 ? a : b; }
 
 // The pictures the preview shows.
 inline constexpr uint32_t kPreviewPictures = 4;

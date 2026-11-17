@@ -211,6 +211,18 @@ uint32_t MSGPIAPI fGetDynamicColors(uint32_t frame, uint16_t* colors, uint32_t c
 
 uint32_t MSGPIAPI fGetCurrentFrame() { return g_current; }
 
+// The selected frames, ascending; just the current one when none is set.
+std::vector<uint32_t> g_selected;
+uint32_t MSGPIAPI fGetSelectedFrames(uint32_t* frames, uint32_t cap)
+{
+   std::vector<uint32_t> list = g_selected;
+   if (list.empty() && g_current != CDMDPI_NONE)
+      list.push_back(g_current);
+   for (uint32_t i = 0; i < list.size() && i < cap; ++i)
+      frames[i] = list[i];
+   return static_cast<uint32_t>(list.size());
+}
+
 int MSGPIAPI fShowFrames(uint32_t, const uint32_t* frames, uint32_t count)
 {
    g_shown.assign(frames, frames + count);
@@ -639,6 +651,7 @@ void setUpApi()
    g_api.GetDynamicMask = fGetDynamicMask;
    g_api.GetDynamicColors = fGetDynamicColors;
    g_api.GetCurrentFrame = fGetCurrentFrame;
+   g_api.GetSelectedFrames = fGetSelectedFrames;
    g_api.ShowFrames = fShowFrames;
    g_api.AddMenuEntry = fAddMenuEntry;
    g_api.RemoveMenuEntries = fRemoveMenuEntries;
@@ -680,6 +693,7 @@ void resetProject(uint32_t w, uint32_t h, bool withZones)
    g_scenes.clear();
    g_inBatch = false;
    g_current = 0;
+   g_selected.clear();
    g_settings.clear();
    g_messages.clear();
    g_status.clear();
@@ -1393,7 +1407,7 @@ void testTheWindow()
    CHECK(tg && tg->kind == CDMDPI_FIELD_RADIO && tg->label == "Transition to" && tg->value == "black");
    if (tg)
    {
-      const std::vector<std::string> want = {"black", "white"};
+      const std::vector<std::string> want = {"black", "white", "frame"};
       CHECK(choiceValues(*tg) == want);
    }
    change("option", "random");
@@ -1759,6 +1773,197 @@ void testRefusedMoveRollsBack()
    CHECK(g_status.empty());
 }
 
+
+// ---- Transitions to another frame -----------------------------------------------------------
+
+// A second frame that differs from the first everywhere (the shades, the pictures), with dynamic
+// zones in sets 0 and 1 (the first frame's zones use sets 0 .. 3): set 0 has other colors than
+// the first frame's set 0 (a clash), set 1 the same colors (no clash).
+Frame makeSecondFrame(bool zones)
+{
+   Frame f = makeSourceFrame(zones);
+   for (uint32_t y = 0; y < g_h; ++y)
+      for (uint32_t x = 0; x < g_w; ++x)
+      {
+         const size_t i = static_cast<size_t>(y) * g_w + x;
+         f.original[i] = static_cast<uint8_t>(1 + (x + 2 * y + 1) % 3);
+         f.sd[i] = static_cast<uint16_t>(0x0841 * (1 + f.original[i]) + (i % 7) * 0x0020 + 0x4000);
+      }
+   if (zones)
+   {
+      for (size_t i = 0; i < f.zones.size(); ++i)
+         f.zones[i] = static_cast<uint8_t>(i % 2);
+      for (size_t k = 0; k < kColors; ++k)
+         f.dynamicColors[0 * kColors + k] = static_cast<uint16_t>(0xF800 - 0x0800 * k); // reds, not the first frame's
+   }
+   return f;
+}
+
+void selectTwo(uint32_t start, uint32_t end)
+{
+   g_current = start;
+   g_selected = {std::min(start, end), std::max(start, end)};
+}
+
+void testAnotherFrame()
+{
+   // The choice, the note and the list follow the selection.
+   resetProject(128, 32, true);
+   g_frames[1] = makeSecondFrame(true);
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   CHECK(fieldOf("source") && fieldOf("source")->label.find("From frame 0 to frame 1") != std::string::npos);
+   change("transition", "wipe");
+   change("option", "left");
+   const Form::Field* f = fieldOf("frames");
+   CHECK(f && choiceValues(*f).size() >= 10);
+   change("frames", "3");
+   change("placement", "end");
+   CHECK(fieldOf("preview") && fieldOf("preview")->visible && fieldOf("preview")->images.size() == 3);
+   closeForm(true);
+   CHECK(g_endEditApplied == 1 && g_frames.size() == 5);
+   CHECK(g_status.size() == 1 && g_status[0].find("Wipe (Left) to frame 1") != std::string::npos);
+   // The clash is reported: set 1 (human) holds different colors in both frames.
+   CHECK(g_messages.size() == 1 && g_messages[0].find("dynamic set 1") != std::string::npos &&
+         g_messages[0].find("dynamic set 5") != std::string::npos);
+   const Frame& a = g_frames[0];
+   const Frame& b = g_frames[1];
+   long fromSecond[3] = {0, 0, 0}, fromFirst[3] = {0, 0, 0};
+   for (int k = 0; k < 3 && g_frames.size() == 5; ++k)
+   {
+      const Frame& n = g_frames[2 + k];
+      for (size_t p = 0; p < n.sd.size(); ++p)
+      {
+         if (n.sd[p] == a.sd[p])
+         {
+            ++fromFirst[k];
+            CHECK(n.original[p] == a.original[p] && n.zones[p] == a.zones[p]);
+         }
+         else
+         {
+            ++fromSecond[k];
+            CHECK(n.sd[p] == b.sd[p] && n.original[p] == b.original[p]);
+            // Its zone: the second frame's, with its set 0 (clashing) moved to the first free set (4).
+            const uint8_t want = b.zones[p] == 0 ? 4 : b.zones[p];
+            CHECK(n.zones[p] == want);
+         }
+      }
+      // Set 4 has the second frame's set 0 colors; set 0 is still the first frame's; no rotations.
+      for (uint32_t c = 0; c < kColors; ++c)
+      {
+         CHECK(n.dynamicColors[4 * kColors + c] == b.dynamicColors[0 * kColors + c]);
+         CHECK(n.dynamicColors[0 * kColors + c] == a.dynamicColors[0 * kColors + c]);
+      }
+      CHECK(n.rotations == 0);
+   }
+   CHECK(fromSecond[0] > 0 && fromSecond[1] > fromSecond[0] && fromSecond[2] > fromSecond[1]);
+   CHECK(fromFirst[2] > 0 && fromFirst[0] > fromFirst[1] && fromFirst[1] > fromFirst[2]); // never all of the second
+
+   // The same colors in the same set do not clash: no set is moved, no message.
+   resetProject(128, 32, true);
+   g_frames[1] = makeSecondFrame(true);
+   for (size_t k = 0; k < kColors; ++k)
+      g_frames[1].dynamicColors[k] = g_frames[0].dynamicColors[k];
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "wipe");
+   change("option", "left");
+   change("frames", "2");
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_frames.size() == 4 && g_messages.empty());
+   for (size_t p = 0; g_frames.size() == 4 && p < g_frames[3].sd.size(); ++p)
+      if (g_frames[3].sd[p] == g_frames[1].sd[p])
+         CHECK(g_frames[3].zones[p] == g_frames[1].zones[p]);
+
+   // No dynamic set left for a clashing one: those zones are not in the new frames, and it is said.
+   resetProject(128, 32, true);
+   for (size_t i = 0; i < g_frames[0].zones.size(); ++i)
+      g_frames[0].zones[i] = static_cast<uint8_t>(i % 32);
+   g_frames[1] = makeSecondFrame(true);
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "wipe");
+   change("option", "left");
+   change("frames", "2");
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_frames.size() == 4 && g_messages.size() == 1 && g_messages[0].find("No dynamic set was free") != std::string::npos);
+   for (size_t p = 0; g_frames.size() == 4 && p < g_frames[3].sd.size(); ++p)
+      if (g_frames[3].sd[p] == g_frames[1].sd[p] && g_frames[1].zones[p] == 0)
+         CHECK(g_frames[3].zones[p] == 255);
+
+   // A cross-fade blends the pictures; the zones change over at the halfway point.
+   resetProject(128, 32, true);
+   g_frames[1] = makeSecondFrame(true);
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "fade");
+   const Form::Field* ff = fieldOf("frames");
+   CHECK(ff && choiceValues(*ff).size() >= 3);
+   change("frames", "3");
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_frames.size() == 5);
+   for (int k = 0; k < 3 && g_frames.size() == 5; ++k)
+   {
+      const Frame& n = g_frames[2 + k];
+      long blended = 0;
+      for (size_t p = 0; p < n.sd.size(); ++p)
+      {
+         const uint16_t x = g_frames[0].sd[p], y = g_frames[1].sd[p];
+         for (int shift : {11, 0})
+         {
+            const int lo = std::min<int>((x >> shift) & 31, (y >> shift) & 31);
+            const int hi = std::max<int>((x >> shift) & 31, (y >> shift) & 31);
+            const int v = (n.sd[p] >> shift) & 31;
+            CHECK(v >= lo && v <= hi);
+         }
+         blended += n.sd[p] != x && n.sd[p] != y;
+         const uint8_t first = g_frames[0].zones[p];
+         const uint8_t second = g_frames[1].zones[p] == 0 ? 4 : g_frames[1].zones[p];
+         CHECK(n.zones[p] == (k < 1 ? first : second)); // weight 1/4 then 1/2 and 3/4
+      }
+      CHECK(blended > 0);
+   }
+
+   // Without a second frame the list says so, and Apply makes nothing.
+   resetProject(128, 32, false);
+   openMenu();
+   change("target", "frame");
+   CHECK(fieldOf("frames") && choiceValues(*fieldOf("frames")) == std::vector<std::string>{"0"});
+   CHECK(fieldOf("frames")->help.find("Ctrl+click") != std::string::npos);
+   closeForm(true);
+   CHECK(g_endEditApplied == 0 && g_frames.size() == 2 && g_messages.size() == 1 &&
+         g_messages[0].find("Ctrl+click") != std::string::npos);
+
+   // Three selected frames: exactly two are needed.
+   resetProject(128, 32, false);
+   g_frames.push_back(makeSourceFrame(false));
+   g_current = 0;
+   g_selected = {0, 1, 2};
+   openMenu();
+   change("target", "frame");
+   CHECK(fieldOf("source") && fieldOf("source")->label.find("exactly two") != std::string::npos);
+   closeForm(false);
+
+   // The window follows the selection while it is open, and the start is the frame clicked last.
+   resetProject(128, 32, false);
+   g_frames.push_back(makeSourceFrame(false));
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   CHECK(fieldOf("source")->label.find("From frame 0 to frame 1") != std::string::npos);
+   selectTwo(1, 0);
+   fireEvent(CDMDPI_EVT_ON_SELECTION_CHANGED);
+   CHECK(fieldOf("source")->label.find("From frame 1 to frame 0") != std::string::npos);
+   closeForm(false);
+}
+
 void testScene()
 {
    // The new frames become a scene that the starting frame starts; the plain frames go again.
@@ -1863,6 +2068,7 @@ int main()
    testPlacementAtTheEnd();
    testRefusedMoveRollsBack();
    testScene();
+   testAnotherFrame();
    // Every transition through the window, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};

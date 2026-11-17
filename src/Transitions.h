@@ -49,6 +49,9 @@ struct SourceInfo
    uint32_t darkestShade = 0;
    std::vector<uint16_t> colors;  // the distinct RGB565 colors of the colorized pictures
    bool toWhite = false;          // the transition goes to white instead of black (what a fade needs to know)
+   bool toFrame = false;          // the transition goes to another frame (shown underneath)
+   uint32_t crossSpan = 0;        // toFrame: the largest color difference between the two frames, in
+                                  // units of a 5-bit channel (what a cross-fade needs to know)
 };
 
 class Effect
@@ -73,6 +76,12 @@ public:
    virtual bool changesColors() const { return false; }
    virtual uint16_t color(uint16_t c, uint32_t /*step*/, uint32_t /*steps*/) const { return c; }
    virtual uint8_t shade(uint8_t s, uint32_t /*step*/, uint32_t /*steps*/) const { return s; }
+
+   // Effects that go to another frame by blending (the fade) say so; the weight of the other frame
+   // is then 0 .. 65536 (16.16), growing with the step, never 1.0 (the other frame is a frame of
+   // its own). The others take pixels away, and the other frame shows where they were.
+   virtual bool crossFades() const { return false; }
+   virtual uint32_t weight(uint32_t /*step*/, uint32_t /*steps*/) const { return 0; }
 };
 
 // ---- Helpers --------------------------------------------------------------------------------
@@ -451,6 +460,14 @@ class Fade final : public Effect
 public:
    Fade(bool toWhite, const SourceInfo& source) : m_toWhite(toWhite), m_colorCount(std::max(2u, source.colorCount))
    {
+      if (source.toFrame)
+      {
+         // A cross-fade to another frame: each step has to move every pixel at least one unit (of
+         // a 5-bit channel) from the one before, and the last has to differ from the other frame.
+         m_cross = true;
+         m_maxSteps = source.crossSpan >= 2 ? std::min(kMaxSteps, source.crossSpan - 1u) : 0;
+         return;
+      }
       // The room a color has to fade in, in units of a 5-bit channel (green has 6 bits, so it
       // counts half): the brightest color's brightest channel for a fade to black, the darkest
       // color's darkest channel for a fade to white.
@@ -468,8 +485,17 @@ public:
    }
 
    uint32_t maxSteps() const override { return m_maxSteps; }
-   const char* limitReason() const override { return "the picture only has so many brightness levels to fade through"; }
-   bool changesColors() const override { return true; }
+   const char* limitReason() const override
+   {
+      return m_cross ? "the two frames only differ by so many brightness levels"
+                     : "the picture only has so many brightness levels to fade through";
+   }
+   bool changesColors() const override { return !m_cross; }
+   bool crossFades() const override { return m_cross; }
+   uint32_t weight(uint32_t step, uint32_t steps) const override
+   {
+      return static_cast<uint32_t>(static_cast<uint64_t>(step) * 65536u / (steps + 1u));
+   }
 
    uint16_t color(uint16_t c, uint32_t step, uint32_t steps) const override
    {
@@ -540,6 +566,7 @@ private:
    }
 
    bool m_toWhite;
+   bool m_cross = false;
    uint32_t m_colorCount;
    uint32_t m_colorSpan = 0;
    uint32_t m_shadeSpan = 0;

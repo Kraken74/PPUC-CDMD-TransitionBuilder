@@ -16,7 +16,7 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
 | **Wipe** | Up, Down, Left, Right, Centre-Out, Edge-In, Spiral | A bar wipes over the picture in the direction you choose (Left: it comes in from the right edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture closes in from the outside edges. Spiral: a spiral winds in from the top left corner. |
 
-Every transition goes **to black or to white**: choose `Transition to` in the window. The last
+Every transition goes **to black, to white or to another frame**: choose `Transition to` in the window. The last
 frame of a transition is never completely black (or white): a dissolve or a wipe ends with a few
 pixels of the picture left, the sliding ones with a thin strip of the picture, a fade with a color one
 step from black (white).
@@ -28,7 +28,7 @@ step from black (white).
    - **Transition:** the transition. The next field changes with it.
    - **Option:** the transition's direction, dissolve type ... Its name and its list depend on the
      transition. The window remembers the option of each transition.
-   - **Transition to:** black or white.
+   - **Transition to:** black, white, or **another frame** (see "Going to another frame" below).
    - **Number of frames:** the list holds only the numbers that work for that transition on your
      frame (see below), so there is nothing to mistype. A number you chose stays chosen while
      the transition can make that many frames.
@@ -109,10 +109,30 @@ GitHub builds it for you:
 4. When the run is green, open it and download `TransitionFX-windows-x64` under
    `Artifacts`. Unpack it: it holds the `TransitionFX` folder from the steps above.
 
+## Going to another frame
+
+Choose `Another frame` in `Transition to`, then select two frames in the frame list: click one,
+then Ctrl+click (Cmd+click on macOS) the other. **The frame you clicked last is the start**, the
+other selected frame the end; the note at the top of the window says "From frame X to frame Y",
+and the window follows when you select other frames. The preview shows your two frames.
+
+- Slide, Wipe, Split, Blinds, Dissolve and Alternating Slide take pixels of the start frame away,
+  and the other frame shows underneath, where they were. The other frame stays still.
+- Fade cross-fades: every pixel blends from the colors of the start frame to those of the other
+  frame. The most frames is how far the two frames' colors are apart.
+- The new frames lie between the two; the end frame itself is not copied.
+- **Dynamic zones:** where both frames use the same dynamic set for different colors, the
+  other frame's zones of that set are moved to a dynamic set nobody uses, with that set's colors, so
+  the first frame's set gives way to the other frame's. The plugin tells you which sets it moved. If no
+  set is free, those zones are left out of the new frames, and it says so. In a cross-fade a pixel
+  changes from its zone in the start frame to its zone in the other frame at the halfway point,
+  because a pixel can be in only one zone.
+- **Color rotations** are removed from the new frames, and the new frames keep the start frame's
+  background and settings. The two frames must be the same size (and both have, or both lack, an HD
+  picture).
+
 ## What it does not do (yet)
 
-- It starts from the **current frame** only, and the transition always goes to black or white.
-  Transitions from one frame to another are planned.
 - It works on the original frame and the one colorized picture; with an HD plane the plugin
   moves it in 2x2 blocks, as the editor's HD plane works.
 - **Backgrounds:** where a frame shows its background, those pixels stay as they are, because the
