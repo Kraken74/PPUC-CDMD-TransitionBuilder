@@ -783,18 +783,20 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       duration = std::to_string(g_window.source.info.durationMs ? g_window.source.info.durationMs : 33);
    const PreviewPictures pictures = makePreview(static_cast<uint32_t>(std::strtol(framesStart.c_str(), nullptr, 10)));
 
+   // Radio buttons choose with one click (version 10); the numbers of frames are too many for them.
+   const uint32_t pick = g_editor->version >= 10 ? CDMDPI_FIELD_RADIO : CDMDPI_FIELD_CHOICE;
    const ColorizingDMDFormField fields[] = {
       {kFieldSource, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTransition, "Transition", CDMDPI_FIELD_CHOICE, transition.id, transitionChoices.c_str(), nullptr, 0,
+      {kFieldTransition, "Transition", pick, transition.id, transitionChoices.c_str(), nullptr, 0,
        nullptr, 0},
-      {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_CHOICE,
+      {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", pick,
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
-      {kFieldTarget, "Transition to", CDMDPI_FIELD_CHOICE, g_window.toWhite ? "white" : "black",
+      {kFieldTarget, "Transition to", pick, g_window.toWhite ? "white" : "black",
        "black=Black\nwhite=White", nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
-      {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_CHOICE, placement.c_str(), placements.c_str(),
+      {kFieldPlacement, "Place the new frames", pick, placement.c_str(), placements.c_str(),
        "A scene is made of the new frames, and the starting frame starts it. Scenes need a project of "
        "128 x 32 frames.",
        0, nullptr, 0},

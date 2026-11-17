@@ -463,6 +463,12 @@ std::vector<std::string> choiceValues(const std::string& choices)
 }
 std::vector<std::string> choiceValues(const Form::Field& f) { return choiceValues(f.choices); }
 
+// A choice, as a drop-down list or as radio buttons (version 10).
+bool isChoice(uint32_t kind)
+{
+   return kind == CDMDPI_FIELD_CHOICE || kind == CDMDPI_FIELD_RADIO;
+}
+
 bool offers(const std::string& choices, const std::string& value)
 {
    const auto values = choiceValues(choices);
@@ -510,7 +516,7 @@ int MSGPIAPI fShowLiveForm(uint32_t, const char* title, const char* accept, cons
       if (in.kind == CDMDPI_FIELD_IMAGE)
          f.images = copyImages(in.images, in.imageCount);
       // As the editor: a choice opens on its first entry when the value is not in the list.
-      if (in.kind == CDMDPI_FIELD_CHOICE && !offers(f.choices, f.value))
+      if (isChoice(in.kind) && !offers(f.choices, f.value))
          f.value = choiceValues(f.choices).empty() ? std::string() : choiceValues(f.choices).front();
       g_form.fields.push_back(f);
    }
@@ -533,12 +539,12 @@ int MSGPIAPI fSetFormField(uint32_t, const char* key, const ColorizingDMDFormFie
    const uint32_t c = update->changes;
    if ((c & CDMDPI_FORM_SET_VALUE) && (f->kind == CDMDPI_FIELD_NOTE || f->kind == CDMDPI_FIELD_IMAGE))
       return 0;
-   if ((c & CDMDPI_FORM_SET_CHOICES) && (f->kind != CDMDPI_FIELD_CHOICE || !update->choices || !*update->choices))
+   if ((c & CDMDPI_FORM_SET_CHOICES) && (!isChoice(f->kind) || !update->choices || !*update->choices))
       return 0;
    if ((c & CDMDPI_FORM_SET_IMAGES) && f->kind != CDMDPI_FIELD_IMAGE)
       return 0;
    const std::string choices = (c & CDMDPI_FORM_SET_CHOICES) ? update->choices : f->choices;
-   if ((c & CDMDPI_FORM_SET_VALUE) && f->kind == CDMDPI_FIELD_CHOICE && !offers(choices, update->value ? update->value : ""))
+   if ((c & CDMDPI_FORM_SET_VALUE) && isChoice(f->kind) && !offers(choices, update->value ? update->value : ""))
       return 0;
    ++g_fieldUpdates;
    if (c & CDMDPI_FORM_SET_ENABLED)
@@ -625,7 +631,7 @@ void fireEvent(const char* name)
 
 void setUpApi()
 {
-   g_api.version = 9;
+   g_api.version = 10;
    g_api.GetProjectInfo = fGetProjectInfo;
    g_api.GetFrameInfo = fGetFrameInfo;
    g_api.GetOriginalFrame = fGetOriginalFrame;
@@ -697,7 +703,7 @@ void change(const char* key, const std::string& value)
    if (!g_form.open || !f)
       return;
    CHECK(f->visible && f->enabled);
-   if (f->kind == CDMDPI_FIELD_CHOICE)
+   if (isChoice(f->kind))
    {
       if (!offers(f->choices, value))
          std::printf("%s does not offer %s\n", key, value.c_str());
@@ -1353,7 +1359,7 @@ void testTheWindow()
 
    // The transition list holds every transition, the first one chosen at first.
    const Form::Field* t = fieldOf("transition");
-   CHECK(t && t->kind == CDMDPI_FIELD_CHOICE);
+   CHECK(t && t->kind == CDMDPI_FIELD_RADIO);
    if (t)
    {
       const auto values = choiceValues(*t);
@@ -1368,7 +1374,7 @@ void testTheWindow()
    // The option follows the transition: its label, its list, its help.
    change("transition", "dissolve");
    const Form::Field* o = fieldOf("option");
-   CHECK(o && o->kind == CDMDPI_FIELD_CHOICE && o->visible);
+   CHECK(o && o->kind == CDMDPI_FIELD_RADIO && o->visible);
    if (o)
    {
       const std::vector<std::string> want = {"orderly", "random"};
@@ -1378,7 +1384,7 @@ void testTheWindow()
    }
    // What the transition goes to: black or white, for every transition.
    const Form::Field* tg = fieldOf("target");
-   CHECK(tg && tg->kind == CDMDPI_FIELD_CHOICE && tg->label == "Transition to" && tg->value == "black");
+   CHECK(tg && tg->kind == CDMDPI_FIELD_RADIO && tg->label == "Transition to" && tg->value == "black");
    if (tg)
    {
       const std::vector<std::string> want = {"black", "white"};
@@ -1388,7 +1394,7 @@ void testTheWindow()
 
    // The frames list: exactly 1 .. maxSteps, opened on 10.
    const Form::Field* f = fieldOf("frames");
-   CHECK(f && f->kind == CDMDPI_FIELD_CHOICE);
+   CHECK(f && f->kind == CDMDPI_FIELD_CHOICE); // too many numbers for radio buttons
    if (f)
    {
       const auto values = choiceValues(*f);
@@ -1411,7 +1417,7 @@ void testTheWindow()
 
    // Where the new frames go: after, at the end, or as a scene on 128 x 32.
    const Form::Field* place = fieldOf("placement");
-   CHECK(place && place->kind == CDMDPI_FIELD_CHOICE && place->value == "after");
+   CHECK(place && place->kind == CDMDPI_FIELD_RADIO && place->value == "after");
    if (place)
       CHECK((choiceValues(*place) == std::vector<std::string>{"after", "end", "scene"}));
    const Form::Field* duration = fieldOf("duration");
@@ -1863,6 +1869,16 @@ int main()
    openMenu();
    TransitionFXPluginUnload();
    CHECK(g_menuCallback == nullptr && !g_form.open && g_subscriptions.empty());
+
+   // An editor of version 9 shows drop-down lists instead of radio buttons.
+   g_api.version = 9;
+   TransitionFXPluginLoad(1, &g_bus);
+   resetProject(128, 32, false);
+   openMenu();
+   CHECK(g_form.open && fieldOf("transition") && fieldOf("transition")->kind == CDMDPI_FIELD_CHOICE &&
+         fieldOf("target") && fieldOf("target")->kind == CDMDPI_FIELD_CHOICE && fieldOf("placement") &&
+         fieldOf("placement")->kind == CDMDPI_FIELD_CHOICE);
+   TransitionFXPluginUnload();
 
    // An editor before version 9 gets no menu entry.
    g_api.version = 8;

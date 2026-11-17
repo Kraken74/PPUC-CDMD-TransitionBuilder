@@ -38,6 +38,10 @@ step from black (white).
      make them.
 3. Click `Apply`. `Cancel` changes nothing.
 
+The transition, its option, what it goes to (black or white) and the placement are radio buttons,
+so one click chooses (plugin API version 10, PPUC Colorizing DMD 3.99.40 or later); an older editor
+shows drop-down lists.
+
 The window does not block the editor. While it is open you can click another frame in the frame
 list: the window then starts from that frame, and the preview shows it. The window opens on the
 choices you applied last.
@@ -135,7 +139,7 @@ answers are used for the original shades, the pictures, the dynamic zones and th
   scene).
 - `src/Preview.h`: drawing the steps of a transition, for the new frames and the preview.
 - `src/Transitions.h`: the transitions.
-- `include/`: the editor's plugin API (`ColorizingDMDPlugin.h`, version 9, from
+- `include/`: the editor's plugin API (`ColorizingDMDPlugin.h`, version 10, from
   PPUC-Colorizing-DMD) and the VPX plugin SDK header (`plugins/MsgPlugin.h`).
 - `tests/`: tests that run the plugin against a fake editor.
 
