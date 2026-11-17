@@ -1964,6 +1964,73 @@ void testAnotherFrame()
    closeForm(false);
 }
 
+// The preview draws dynamic zones in the colors of their sets (the colorized picture of a dynamic
+// pixel is black); the frames Apply makes keep the picture as it is.
+void testPreviewShowsDynamicContent()
+{
+   resetProject(128, 32, true);
+   std::fill(g_frames[0].sd.begin(), g_frames[0].sd.end(), 0); // a fully dynamic frame: nothing colorized
+   openMenu();
+   change("transition", "wipe");
+   change("option", "left");
+   change("frames", "4");
+   const Form::Field* pv = fieldOf("preview");
+   CHECK(pv && pv->images.size() == 4);
+   long lit = 0;
+   for (size_t k = 0; pv && k < pv->images.size(); ++k)
+      for (size_t p = 0; p < pv->images[k].pixels.size(); ++p)
+      {
+         const uint16_t px = pv->images[k].pixels[p];
+         if (px == 0)
+            continue;
+         ++lit;
+         CHECK(px == g_frames[0].dynamicColors[g_frames[0].zones[p] * kColors + g_frames[0].original[p]]);
+      }
+   CHECK(lit > 0);
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_frames.size() == 6);
+   for (size_t k = 2; k < g_frames.size(); ++k) // the new frames keep an unpainted picture
+      for (uint16_t px : g_frames[k].sd)
+         CHECK(px == 0);
+
+   // A fully dynamic frame can fade: the colors its zones show count, not its black picture.
+   resetProject(128, 32, true);
+   std::fill(g_frames[0].sd.begin(), g_frames[0].sd.end(), 0);
+   openMenu();
+   change("transition", "fade");
+   CHECK(fieldOf("frames") && choiceValues(*fieldOf("frames")).size() > 1);
+   closeForm(false);
+
+   // To another frame the second frame's zones use the colors of the sets as the new frames number them.
+   resetProject(128, 32, true);
+   g_frames[1] = makeSecondFrame(true);
+   std::fill(g_frames[1].sd.begin(), g_frames[1].sd.end(), 0);
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "wipe");
+   change("option", "left");
+   change("frames", "4");
+   pv = fieldOf("preview");
+   CHECK(pv && pv->images.size() == 4);
+   const Frame& b = g_frames[1];
+   long fromSecond = 0;
+   for (size_t p = 0; pv && p < pv->images[3].pixels.size(); ++p)
+      if (pv->images[3].pixels[p] != g_frames[0].sd[p])
+      {
+         // The first frame's own pixels are colored by its sets, the second one's by its colors.
+         const uint16_t px = pv->images[3].pixels[p];
+         const uint16_t own = g_frames[0].dynamicColors[g_frames[0].zones[p] * kColors + g_frames[0].original[p]];
+         const uint16_t other = b.dynamicColors[b.zones[p] * kColors + b.original[p]];
+         if (px != own)
+            CHECK(px == other);
+         fromSecond += px == other && px != own;
+      }
+   CHECK(fromSecond > 0);
+   closeForm(false);
+}
+
 void testScene()
 {
    // The new frames become a scene that the starting frame starts; the plain frames go again.
@@ -2069,6 +2136,7 @@ int main()
    testRefusedMoveRollsBack();
    testScene();
    testAnotherFrame();
+   testPreviewShowsDynamicContent();
    // Every transition through the window, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};

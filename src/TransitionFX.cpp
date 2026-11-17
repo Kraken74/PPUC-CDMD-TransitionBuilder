@@ -308,6 +308,25 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
             seen[pixel] = true;
             info.colors.push_back(pixel);
          }
+   // The colors the dynamic zones show are colors of the frame too (its colorized picture is
+   // black where a zone colors the pixel).
+   if (!source.zones.empty() && source.colorCount > 0)
+   {
+      bool used[CDMDPI_DYNAMIC_SETS] = {};
+      for (uint8_t set : source.zones)
+         if (set < CDMDPI_DYNAMIC_SETS)
+            used[set] = true;
+      for (uint32_t set = 0; set < CDMDPI_DYNAMIC_SETS; ++set)
+         for (uint32_t shade = 0; used[set] && shade < source.colorCount; ++shade)
+         {
+            const size_t index = static_cast<size_t>(set) * source.colorCount + shade;
+            if (index < source.dynamicColors.size() && !seen[source.dynamicColors[index]])
+            {
+               seen[source.dynamicColors[index]] = true;
+               info.colors.push_back(source.dynamicColors[index]);
+            }
+         }
+   }
    return info;
 }
 
@@ -628,7 +647,9 @@ std::string createTransition(const Request& request, Result& result)
    }
 
    if (!g_editor->EndEdit(g_endpoint, 1))
-      return "The editor did not record the new frames (the status bar may say why). Nothing was changed.";
+      return "The editor did not record the new frames. In a team project a partner is probably working on "
+             "the frame order or on this frame: the status bar names who, for a few seconds. Merge the partners' changes first, or ask them. "
+             "Nothing was changed.";
 
    result.shown = created;
    g_editor->ShowFrames(result.shown.front(), result.shown.data(), static_cast<uint32_t>(result.shown.size()));
@@ -783,12 +804,66 @@ struct PreviewPictures
    std::vector<ColorizingDMDFormImage> images;
 };
 
+// The picture as the preview shows it: where the frame has dynamic zones, the pixels of a zone are
+// drawn in the color their dynamic set gives their shade (at run time the editor's colorized
+// picture has nothing there, so a fully dynamic frame would be black). Only the preview does
+// this; the new frames keep their zones.
+Plane staticPlane(const Source& source, const Plane& plane, const std::vector<uint8_t>& zones, uint32_t zonesWidth,
+                  uint32_t zonesHeight, const std::vector<uint16_t>& colors)
+{
+   Plane out = plane;
+   const uint32_t count = source.colorCount;
+   if (zones.empty() || colors.empty() || count == 0 || zonesWidth == 0 || zonesHeight == 0 || plane.width == 0 ||
+       plane.height == 0 || source.originalWidth == 0 || source.originalHeight == 0)
+      return out;
+   for (uint32_t y = 0; y < plane.height; ++y)
+      for (uint32_t x = 0; x < plane.width; ++x)
+      {
+         const size_t zoneIndex = static_cast<size_t>(static_cast<uint64_t>(y) * zonesHeight / plane.height) * zonesWidth +
+                                  static_cast<uint64_t>(x) * zonesWidth / plane.width;
+         const size_t shadeIndex = static_cast<size_t>(static_cast<uint64_t>(y) * source.originalHeight / plane.height) *
+                                      source.originalWidth +
+                                   static_cast<uint64_t>(x) * source.originalWidth / plane.width;
+         if (zoneIndex >= zones.size() || shadeIndex >= source.original.size())
+            continue;
+         const uint32_t set = zones[zoneIndex];
+         const uint32_t shade = source.original[shadeIndex];
+         if (set >= CDMDPI_DYNAMIC_SETS || shade >= count || static_cast<size_t>(set) * count + shade >= colors.size())
+            continue;
+         out.pixels[static_cast<size_t>(y) * plane.width + x] = colors[static_cast<size_t>(set) * count + shade];
+      }
+   return out;
+}
+
 PreviewPictures makePreview(uint32_t steps)
 {
    PreviewPictures out;
    if (!g_window.effect || steps < 1 || steps > mostFrames() || g_window.source.planes.empty())
       return out;
-   const Plane& plane = g_window.source.planes.front();
+   const Source& first = g_window.source;
+   const Combined& combined = g_window.combined;
+   const bool both = g_window.toFrame && combined.hasZones;
+   // The second frame's sets as the new frames number them: its colors for the sets it brought along.
+   std::vector<uint16_t> colors2 = first.dynamicColors;
+   if (g_window.toFrame)
+   {
+      if (colors2.empty())
+         colors2.assign(static_cast<size_t>(CDMDPI_DYNAMIC_SETS) * first.colorCount, 0);
+      for (const auto& entry : combined.sets)
+         if (entry.second.size() == first.colorCount &&
+             (static_cast<size_t>(entry.first) + 1) * first.colorCount <= colors2.size())
+            std::copy(entry.second.begin(), entry.second.end(),
+                      colors2.begin() + static_cast<size_t>(entry.first) * first.colorCount);
+   }
+   const Plane plane = staticPlane(first, first.planes.front(), both ? combined.zones1 : first.zones,
+                                   both ? combined.zonesWidth : first.zonesWidth,
+                                   both ? combined.zonesHeight : first.zonesHeight, first.dynamicColors);
+   Plane secondPlane;
+   if (g_window.toFrame)
+      secondPlane = staticPlane(g_window.second, g_window.second.planes.front(),
+                                both ? combined.zones2 : g_window.second.zones,
+                                both ? combined.zonesWidth : g_window.second.zonesWidth,
+                                both ? combined.zonesHeight : g_window.second.zonesHeight, colors2);
    const transitions::Effect& effect = *g_window.effect;
    const uint16_t fillColor = g_window.toWhite ? static_cast<uint16_t>(0xFFFF) : static_cast<uint16_t>(0);
    const std::vector<uint32_t> shown = preview::previewSteps(steps);
@@ -797,7 +872,7 @@ PreviewPictures makePreview(uint32_t steps)
    for (size_t i = 0; i < shown.size(); ++i)
    {
       const uint32_t step = shown[i];
-      drawPlane(plane, g_window.toFrame ? &g_window.second.planes.front() : nullptr, fillColor, effect, step, steps,
+      drawPlane(plane, g_window.toFrame ? &secondPlane : nullptr, fillColor, effect, step, steps,
                 out.pixels[i]);
       out.captions[i] = "Frame " + std::to_string(step) + " of " + std::to_string(steps);
    }

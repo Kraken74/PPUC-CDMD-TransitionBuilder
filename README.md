@@ -34,8 +34,9 @@ step from black (white).
      the transition can make that many frames.
    - **Place the new frames:** immediately after the starting frame, at the end of the project, or
      as a scene that the starting frame starts (see "As a scene" below).
-   - **Preview:** four frames of the transition, drawn from your frame exactly as `Apply` will
-     make them.
+   - **Preview:** four frames of the transition, drawn from your frame as `Apply` will
+     make them. Dynamic zones are drawn in the colors of their dynamic sets, so a dynamic frame
+     shows its colors here (the new frames keep their zones as they are).
 3. Click `Apply`. `Cancel` changes nothing.
 
 The transition, its option, what it goes to (black or white) and the placement are radio buttons,
