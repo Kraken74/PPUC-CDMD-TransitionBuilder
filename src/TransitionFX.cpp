@@ -1,8 +1,8 @@
 // license:GPLv3+
 //
-// Transition Builder: a plugin for the PPUC Colorizing DMD editor.
+// TransitionFX: a plugin for the PPUC Colorizing DMD editor.
 //
-// Plugins menu -> "Transition Builder...". One window (a live form of the editor API version 9)
+// Plugins menu -> "TransitionFX...". One window (a live form of the editor API version 9)
 // holds everything: the transition, its option (its direction, its type ...), the number of
 // frames, where the new frames go, and a preview of the transition on the author's own frame.
 // The fields follow each other while the author fills them in: the options belong to the
@@ -40,14 +40,15 @@ unsigned int g_getApiId = 0;
 unsigned int g_selectionChangedId = 0;
 unsigned int g_projectChangedId = 0;
 
-constexpr const char* kTitle = "Transition Builder";
-constexpr const char* kUndoName = "Transition Builder";
+constexpr const char* kTitle = "TransitionFX";
+constexpr const char* kUndoName = "TransitionFX";
 
 // The fields of the window. Their values are kept as settings when the author clicks Apply, so
 // the window opens on the last choices.
 constexpr const char* kFieldSource = "source"; // the note that names the starting frame
 constexpr const char* kFieldTransition = "transition";
 constexpr const char* kFieldOption = "option";
+constexpr const char* kFieldTarget = "target"; // "black" or "white": what the transition goes to
 constexpr const char* kFieldFrames = "frames";
 constexpr const char* kFieldPlacement = "placement"; // "after", "end" or "scene"
 constexpr const char* kFieldDuration = "duration";   // the scene's frame duration
@@ -93,6 +94,7 @@ struct Window
    const transitions::Transition* transition = nullptr;
    const transitions::Option* option = nullptr; // null for a transition without options
    std::unique_ptr<transitions::Effect> effect;
+   bool toWhite = false; // the transition goes to white instead of black
    // The number of frames the author asked for: the list shows it whenever the transition can
    // make that many, and the most it can make otherwise.
    std::string framesWanted;
@@ -152,12 +154,13 @@ std::string formValue(const char* key, const char* fallback)
 // The option a transition was last used with is kept per transition.
 std::string optionKey(const transitions::Transition& transition) { return std::string("option_") + transition.id; }
 
-std::string describe(const transitions::Transition& transition, const transitions::Option* option)
+// What the author chose, in words: "Wipe (Spiral) to White".
+std::string describe(const transitions::Transition& transition, const transitions::Option* option, bool toWhite)
 {
    std::string what = transition.label;
    if (option)
       what += std::string(" (") + option->label + ")";
-   return what;
+   return what + (toWhite ? " to White" : " to Black");
 }
 
 // ---- Reading the frame ----------------------------------------------------------------------
@@ -220,9 +223,10 @@ std::string loadSource(uint32_t frame, Source& source)
 }
 
 // What the effects need to know about the frame.
-transitions::SourceInfo sourceInfoOf(const Source& source)
+transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite)
 {
    transitions::SourceInfo info;
+   info.toWhite = toWhite;
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
@@ -297,13 +301,17 @@ std::string createTransition(const Request& request, Result& result)
    std::vector<uint8_t> stepZones;
    std::vector<uint16_t> stepColors(source.colorCount);
    std::vector<uint32_t> created;
+   // What a pixel the transition has taken away becomes: black (shade 0, RGB565 0) or white (the
+   // brightest shade, RGB565 0xFFFF). Such a pixel is in no dynamic zone.
+   const uint8_t fillShade = g_window.toWhite ? static_cast<uint8_t>(source.colorCount - 1u) : static_cast<uint8_t>(0);
+   const uint16_t fillColor = g_window.toWhite ? static_cast<uint16_t>(0xFFFF) : static_cast<uint16_t>(0);
 
    for (uint32_t step = 1; step <= steps; ++step)
    {
       const std::string which = "frame " + std::to_string(step) + " of " + std::to_string(steps);
 
-      // The original: black pixels are shade 0, so every new frame differs from the others.
-      preview::renderStep<uint8_t>(source.original, stepOriginal, ow, oh, ow, oh, effect, step, steps, 0,
+      // The original: the pixels taken away get the shade of black (0) or white (the brightest).
+      preview::renderStep<uint8_t>(source.original, stepOriginal, ow, oh, ow, oh, effect, step, steps, fillShade,
                                    [&](uint8_t shade) { return effect.shade(shade, step, steps); });
 
       // The new frame is made like the source: its settings and pictures come along.
@@ -323,7 +331,7 @@ std::string createTransition(const Request& request, Result& result)
       for (const Plane& plane : source.planes)
       {
          preview::renderStep<uint16_t>(plane.pixels, stepPixels, plane.width, plane.height, ow, oh, effect, step,
-                                       steps, 0, // RGB565 black
+                                       steps, fillColor,
                                        [&](uint16_t color) { return effect.color(color, step, steps); });
          if (!g_editor->SetFramePicture(g_endpoint, newFrame, plane.hd, stepPixels.data(), nullptr,
                                         static_cast<uint32_t>(stepPixels.size())))
@@ -331,7 +339,7 @@ std::string createTransition(const Request& request, Result& result)
       }
 
       // Dynamic zones color a pixel at run time from its shade, so they move with the picture,
-      // and a black pixel must not stay in a zone.
+      // and a pixel that was taken away must not stay in a zone.
       if (!source.zones.empty())
       {
          preview::renderStep<uint8_t>(source.zones, stepZones, source.zonesWidth, source.zonesHeight, ow, oh,
@@ -364,7 +372,7 @@ std::string createTransition(const Request& request, Result& result)
       // were only the material: they go again. The scene's frames lie behind them, so they move
       // down by as many frames.
       ColorizingDMDScene definition{};
-      const std::string name = describe(*g_window.transition, g_window.option);
+      const std::string name = describe(*g_window.transition, g_window.option, g_window.toWhite);
       definition.sceneId = CDMDPI_NONE;
       definition.name = name.c_str();
       definition.groups = 1;
@@ -444,7 +452,7 @@ void makeEffect()
    g_window.effect.reset();
    if (g_window.sourceProblem.empty() && g_window.transition)
       g_window.effect =
-         g_window.transition->make(g_window.option ? g_window.option->id : "", sourceInfoOf(g_window.source));
+         g_window.transition->make(g_window.option ? g_window.option->id : "", sourceInfoOf(g_window.source, g_window.toWhite));
 }
 
 uint32_t mostFrames() { return g_window.effect ? g_window.effect->maxSteps() : 0; }
@@ -511,6 +519,7 @@ PreviewPictures makePreview(uint32_t steps)
       return out;
    const Plane& plane = g_window.source.planes.front();
    const transitions::Effect& effect = *g_window.effect;
+   const uint16_t fillColor = g_window.toWhite ? static_cast<uint16_t>(0xFFFF) : static_cast<uint16_t>(0);
    const std::vector<uint32_t> shown = preview::previewSteps(steps);
    out.pixels.resize(shown.size());
    out.captions.resize(shown.size());
@@ -519,7 +528,7 @@ PreviewPictures makePreview(uint32_t steps)
       const uint32_t step = shown[i];
       preview::renderStep<uint16_t>(plane.pixels, out.pixels[i], plane.width, plane.height,
                                     g_window.source.originalWidth, g_window.source.originalHeight, effect, step,
-                                    steps, 0, [&](uint16_t color) { return effect.color(color, step, steps); });
+                                    steps, fillColor, [&](uint16_t color) { return effect.color(color, step, steps); });
       out.captions[i] = "Frame " + std::to_string(step) + " of " + std::to_string(steps);
    }
    // The images point into the pixels and captions, which are complete now.
@@ -635,6 +644,12 @@ void MSGPIAPI onFieldChanged(void* /*userData*/, const char* key)
       makeEffect();
       updateFrames();
    }
+   else if (field == kFieldTarget)
+   {
+      g_window.toWhite = formValue(kFieldTarget, "black") == "white";
+      makeEffect();
+      updateFrames();
+   }
    else if (field == kFieldFrames)
    {
       g_window.framesWanted = formValue(kFieldFrames, "10");
@@ -667,9 +682,10 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    g_window.option = transitions::findOption(*g_window.transition, formValue(kFieldOption, "").c_str());
    if (g_window.option)
       saveSetting(optionKey(*g_window.transition).c_str(), g_window.option->id);
+   g_window.toWhite = formValue(kFieldTarget, "black") == "white";
    makeEffect();
 
-   const std::string what = describe(*g_window.transition, g_window.option);
+   const std::string what = describe(*g_window.transition, g_window.option, g_window.toWhite);
    if (mostFrames() < 1)
    {
       message(kTitle, what + " can do nothing with this frame (" + g_window.effect->limitReason() +
@@ -740,6 +756,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
    g_window.option =
       transition.optionCount ? transitions::findOption(transition, setting(optionKey(transition).c_str(), "").c_str())
                              : nullptr;
+   g_window.toWhite = setting(kFieldTarget, "black") == "white";
    makeEffect();
 
    std::string transitionChoices;
@@ -773,6 +790,8 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_CHOICE,
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
+      {kFieldTarget, "Transition to", CDMDPI_FIELD_CHOICE, g_window.toWhite ? "white" : "black",
+       "black=Black\nwhite=White", nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
       {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_CHOICE, placement.c_str(), placements.c_str(),
@@ -806,7 +825,7 @@ void MSGPIAPI onEditorEvent(const unsigned int /*msgId*/, void* /*context*/, voi
 
 } // namespace
 
-MSGPI_EXPORT void MSGPIAPI TransitionBuilderPluginLoad(const uint32_t endpointId, const MsgPluginAPI* api)
+MSGPI_EXPORT void MSGPIAPI TransitionFXPluginLoad(const uint32_t endpointId, const MsgPluginAPI* api)
 {
    g_msg = api;
    g_endpoint = endpointId;
@@ -827,10 +846,10 @@ MSGPI_EXPORT void MSGPIAPI TransitionBuilderPluginLoad(const uint32_t endpointId
    g_projectChangedId = g_msg->GetMsgID(CDMDPI_NAMESPACE, CDMDPI_EVT_ON_PROJECT_CHANGED);
    g_msg->SubscribeMsg(g_endpoint, g_selectionChangedId, onEditorEvent, nullptr);
    g_msg->SubscribeMsg(g_endpoint, g_projectChangedId, onEditorEvent, nullptr);
-   g_editor->AddMenuEntry(g_endpoint, "Transition Builder...", onMenuEntry, nullptr);
+   g_editor->AddMenuEntry(g_endpoint, "TransitionFX...", onMenuEntry, nullptr);
 }
 
-MSGPI_EXPORT void MSGPIAPI TransitionBuilderPluginUnload()
+MSGPI_EXPORT void MSGPIAPI TransitionFXPluginUnload()
 {
    if (g_editor)
    {
