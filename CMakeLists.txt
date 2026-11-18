@@ -14,8 +14,10 @@ add_library(plugin-transitionfx MODULE src/TransitionFX.cpp)
 target_include_directories(plugin-transitionfx PRIVATE include src)
 set_target_properties(plugin-transitionfx PROPERTIES PREFIX "")
 if(WIN32)
-  # The name plugin.cfg gives for windows.x64.
-  set_target_properties(plugin-transitionfx PROPERTIES OUTPUT_NAME "plugin-transitionfx64")
+  # The names plugin.cfg gives for windows.x64 (with the 64) and windows.x86 (without).
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set_target_properties(plugin-transitionfx PROPERTIES OUTPUT_NAME "plugin-transitionfx64")
+  endif()
 endif()
 if(APPLE)
   # The name plugin.cfg gives for macos (a CMake module is a .so there otherwise).
@@ -28,6 +30,16 @@ if(MSVC)
   target_compile_options(plugin-transitionfx PRIVATE /W4)
 else()
   target_compile_options(plugin-transitionfx PRIVATE -Wall -Wextra)
+endif()
+if(UNIX AND NOT MINGW)
+  # Only the two entry points (marked MSGPI_EXPORT) are visible, so the plugin cannot clash with
+  # anything else the editor loads.
+  target_compile_options(plugin-transitionfx PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # The plugin brings its own C++ runtime, so it runs on any Linux the editor does, whatever
+  # libstdc++ that has.
+  target_link_options(plugin-transitionfx PRIVATE -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
 endif()
 
 # "cmake --install build --prefix dist" makes dist/TransitionFX: the folder to put into
