@@ -10,11 +10,15 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 | --- | --- | --- |
 | **Alternating Slide** | Horizontal, Vertical | Horizontal: the 1st, 3rd, 5th ... row slide left, the 2nd, 4th ... row slide right. Vertical: the 1st, 3rd ... column go up, the 2nd, 4th ... column go down. |
 | **Blinds** | Horizontal, Vertical | Bars at regular intervals grow wider until only thin slits of the picture are left. |
+| **Checkerboard** | 2 x 2, 4 x 4, 8 x 8, 16 x 16 | The picture is cut into squares of the size you choose. They disappear one by one: first the squares of one color of a checkerboard, sweeping from the top left corner, then the others. One square is left at the end. |
 | **Dissolve** | Orderly, Random | Pixels disappear in a regular pattern, or at random. |
 | **Fade** | | The picture gets darker (to black) or brighter (to white) with every frame. |
+| **Pixelate** | | The picture turns into bigger and bigger blocks (each shows the pixel at its middle), up to blocks as big as the frame is tall. |
 | **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
+| **Wave** | Horizontal, Vertical | A wave runs through the picture and grows. Horizontal: the rows slide sideways, in one wave over the height. Vertical: the columns slide up and down, in four waves over the width. The crests of the wave leave the frame, so what is left is the parts near the middle of the wave. |
 | **Wipe** | Up, Down, Left, Right, Centre-Out, Edge-In, Spiral | A bar wipes over the picture in the direction you choose (Left: it comes in from the right edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture closes in from the outside edges. Spiral: a spiral winds in from the top left corner. |
+| **Zoom** | In, Out | In: the picture grows toward you, a smaller and smaller part of the middle fills the frame (down to an eighth of the width). Out: the picture shrinks toward the middle (down to a sixteenth of the width). |
 
 Every transition goes **to black, to white or to another frame**: choose `Transition to` in the window. The last
 frame of a transition is never completely black (or white): a dissolve or a wipe ends with a few
@@ -127,8 +131,12 @@ then Ctrl+click (Cmd+click on macOS) the other. **The frame you clicked last is 
 other selected frame the end; the note at the top of the window says "From frame X to frame Y",
 and the window follows when you select other frames. The preview shows your two frames.
 
-- Slide, Wipe, Split, Blinds, Dissolve and Alternating Slide take pixels of the start frame away,
-  and the other frame shows underneath, where they were. The other frame stays still.
+- Slide, Wipe, Split, Blinds, Dissolve, Alternating Slide, Checkerboard, Wave and Zoom Out take
+  pixels of the start frame away, and the other frame shows underneath, where they were. The other
+  frame stays still.
+- Pixelate and Zoom In keep every pixel, so nothing is taken away: they go through both frames.
+  The start frame turns into blocks (or zooms in) and then the other frame comes out of the blocks
+  (or zooms back out to full size). Their most frames is twice that of a transition to black.
 - Fade cross-fades: every pixel blends from the colors of the start frame to those of the other
   frame. The most frames is how far the two frames' colors are apart. The original shades and the
   dynamic zones change over from the start frame's to the other frame's at the halfway point.

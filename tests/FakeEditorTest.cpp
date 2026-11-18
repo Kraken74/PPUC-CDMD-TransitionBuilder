@@ -843,7 +843,8 @@ std::vector<uint64_t> signatureOf(const transitions::Effect& e, uint32_t w, uint
       for (uint32_t x = 0; x < w; ++x)
       {
          const transitions::Rule r = e.rule(x, y, step, steps);
-         sig.push_back(r.visible ? (1ull << 40) | (static_cast<uint64_t>(r.x) << 20) | r.y : 0ull);
+         sig.push_back(r.visible ? (1ull << 40) | (r.second ? 1ull << 41 : 0ull) | (static_cast<uint64_t>(r.x) << 20) | r.y
+                                : 0ull);
       }
    return sig;
 }
@@ -956,12 +957,16 @@ void testEveryEffectOnEverySize()
             for (uint32_t step = 1; step <= most; ++step)
                CHECK(signatureOf(*e, w, h, step, most) != identity);
             CHECK(visibleCount(*e, w, h, most, most) > 0);
-            // Pixels only leave: strictly fewer visible pixels with every step.
+            // Pixels only leave: strictly fewer visible pixels with every step (but not for the
+            // effects that keep every pixel on the screen: all of them stay).
             size_t before = static_cast<size_t>(w) * h;
             for (uint32_t step = 1; step <= most; ++step)
             {
                const size_t now = visibleCount(*e, w, h, step, most);
-               CHECK(now < before);
+               if (e->takesPixelsAway())
+                  CHECK(now < before);
+               else
+                  CHECK(now == before);
                before = now;
             }
             // A visible pixel comes from inside the frame.
@@ -1328,7 +1333,7 @@ void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
       {
          CHECK(std::count(last.sd.begin(), last.sd.end(), 0xFFFF) < static_cast<long>(last.sd.size()));
          // what a transition takes away is exactly RGB565 white (a fade changes the colors instead)
-         if (!isFade(c))
+         if (!isFade(c) && makeEffect(c, w, h)->takesPixelsAway())
             CHECK(std::count(last.sd.begin(), last.sd.end(), 0xFFFF) > 0);
       }
       CHECK(std::count(last.sd.begin(), last.sd.end(), 0) < static_cast<long>(last.sd.size()));
@@ -2068,6 +2073,200 @@ void testFadeKeepsTheOriginalShades()
       CHECK(g_frames[2 + k].original == (k < 1 ? g_frames[0].original : g_frames[1].original)); // weight 1/4, then 1/2, 3/4
 }
 
+// ---- Pixelate, Zoom, Wave, Checkerboard ------------------------------------------------------
+
+std::unique_ptr<transitions::Effect> makeNamed(const char* id, const char* option, uint32_t w, uint32_t h, bool toFrame = false)
+{
+   transitions::SourceInfo info = makeInfo(w, h);
+   info.toFrame = toFrame;
+   return transitions::findTransition(id)->make(option, info);
+}
+
+void testPixelate()
+{
+   auto e = makeNamed("pixelate", "", 128, 32);
+   CHECK(e->maxSteps() == 31 && !e->takesPixelsAway()); // block sizes 2 .. 32
+   // The last frame: blocks of 32 x 32, every pixel of a block shows the pixel at the block's middle.
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         const transitions::Rule r = e->rule(x, y, 31, 31);
+         CHECK(r.visible && !r.second && r.x == x / 32 * 32 + 16 && r.y == 16);
+      }
+   // The first frame has blocks of 2.
+   const transitions::Rule first = e->rule(5, 7, 1, 31);
+   CHECK(first.x == 5 && first.y == 7); // 2 x 2 blocks: the pixel at the middle (odd) of the block
+   CHECK(e->rule(4, 6, 1, 31).x == 5 && e->rule(4, 6, 1, 31).y == 7);
+
+   // To another frame: twice the levels, the blocks grow on the first frame, then shrink on the other.
+   auto both = makeNamed("pixelate", "", 128, 32, true);
+   CHECK(both->maxSteps() == 62);
+   for (uint32_t step = 1; step <= 62; ++step)
+   {
+      const transitions::Rule r = both->rule(10, 10, step, 62);
+      CHECK(r.visible && r.second == (step > 31));
+   }
+   CHECK(both->rule(0, 0, 31, 62).x == 16 && both->rule(0, 0, 31, 62).y == 16); // the largest blocks of the first
+   CHECK(both->rule(0, 0, 32, 62).x == 16 && both->rule(0, 0, 32, 62).y == 16); // the same, of the other
+   CHECK(both->rule(0, 0, 62, 62).x == 1 && both->rule(0, 0, 62, 62).second);   // the other frame, nearly sharp
+}
+
+void testZoom()
+{
+   // Zoom Out: a centred picture that shrinks to 1/16 of the width, the rest is taken away.
+   auto out = makeNamed("zoom", "out", 128, 32);
+   CHECK(out->maxSteps() == 120 && out->takesPixelsAway());
+   const uint32_t smallest = 128 - 120;
+   long first = 0, last = 0;
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         first += out->rule(x, y, 1, 120).visible;
+         const transitions::Rule r = out->rule(x, y, 120, 120);
+         last += r.visible;
+         if (r.visible)
+            CHECK(x >= (128 - smallest) / 2 && x < (128 - smallest) / 2 + smallest);
+      }
+   CHECK(first == 127 * 32 || first == 127 * 32 - 0 || first > 127 * 31); // nearly all of it at the first step
+   CHECK(last == static_cast<long>(smallest) * 2); // 8 x 2 pixels at the end
+   // It shows the whole picture inside the rectangle: the corners of the rectangle are the corners.
+   const transitions::Rule corner = out->rule((128 - 64) / 2, (32 - 16) / 2, 64, 120);
+   CHECK(corner.visible && corner.x == 0 && corner.y == 0);
+
+   // Zoom In: every pixel stays; the last frame shows the middle eighth of the width.
+   auto in = makeNamed("zoom", "in", 128, 32);
+   CHECK(in->maxSteps() == 112 && !in->takesPixelsAway());
+   const transitions::Rule a = in->rule(0, 0, 112, 112), b = in->rule(127, 31, 112, 112);
+   CHECK(a.visible && b.visible && a.x == 56 && b.x >= 56 + 14 && b.x < 128 - 56);
+   CHECK(a.y >= 12 && b.y <= 19); // the middle of the height
+   // To another frame: in on the first frame, then out of the other.
+   auto both = makeNamed("zoom", "in", 128, 32, true);
+   CHECK(both->maxSteps() == 224);
+   CHECK(!both->rule(3, 3, 112, 224).second && both->rule(3, 3, 113, 224).second);
+   CHECK(both->rule(3, 3, 112, 224).x == both->rule(3, 3, 113, 224).x);
+   CHECK(both->rule(0, 0, 224, 224).second && both->rule(0, 0, 224, 224).x <= 1); // nearly full size
+}
+
+void testWave()
+{
+   // The wave: zero at the start and the middle of its period, the amplitude at a quarter, minus it at three quarters.
+   CHECK(transitions::waveShift(0, 16, 10) == 0 && transitions::waveShift(8, 16, 10) == 0);
+   CHECK(transitions::waveShift(4, 16, 10) == 10 && transitions::waveShift(12, 16, 10) == -10);
+   CHECK(transitions::waveShift(16 + 4, 16, 10) == 10); // and it repeats
+   for (uint32_t a = 0; a < 40; ++a)
+      for (uint32_t p = 0; p < 16; ++p)
+         CHECK(std::abs(transitions::waveShift(p, 16, a)) <= static_cast<int32_t>(a));
+
+   // Horizontal: the rows slide sideways (one wave over the 32 rows), what is uncovered is taken away.
+   auto h = makeNamed("wave", "horizontal", 128, 32);
+   CHECK(h->maxSteps() == 128);
+   const transitions::Rule crest = h->rule(50, 8, 20, 128); // row 8 is a crest: moved right by 20
+   CHECK(crest.visible && crest.x == 30 && crest.y == 8);
+   CHECK(!h->rule(10, 8, 20, 128).visible);                 // uncovered on the left
+   const transitions::Rule trough = h->rule(50, 24, 20, 128); // row 24: moved left by 20
+   CHECK(trough.visible && trough.x == 70 && trough.y == 24);
+   const transitions::Rule still = h->rule(50, 16, 20, 128); // row 16 does not move
+   CHECK(still.visible && still.x == 50 && still.y == 16);
+   // Vertical: the columns slide up and down (a period of 32 columns on 128), 32 steps for 32 rows.
+   auto v = makeNamed("wave", "vertical", 128, 32);
+   CHECK(v->maxSteps() == 32);
+   const transitions::Rule down = v->rule(8, 20, 8, 32); // column 8 is a crest: moved down by 8
+   CHECK(down.visible && down.x == 8 && down.y == 12);
+   CHECK(!v->rule(8, 3, 8, 32).visible);
+}
+
+void testCheckerboard()
+{
+   const transitions::Transition* t = transitions::findTransition("checkerboard");
+   CHECK(t && t->optionCount == 4 && std::string(t->optionLabel) == "Square Size");
+   CHECK(std::string(t->options[0].label) == "2 x 2" && std::string(t->options[3].label) == "16 x 16");
+   // 16 x 16 squares on 128 x 32: 16 squares, 15 steps, one square is left.
+   auto e = makeNamed("checkerboard", "16", 128, 32);
+   CHECK(e->maxSteps() == 15);
+   auto tileVisible = [&](uint32_t tx, uint32_t ty, uint32_t step, uint32_t steps) {
+      const bool v = e->rule(tx * 16, ty * 16, step, steps).visible;
+      for (uint32_t y = 0; y < 16; ++y)
+         for (uint32_t x = 0; x < 16; ++x)
+            CHECK(e->rule(tx * 16 + x, ty * 16 + y, step, steps).visible == v); // a square goes as a whole
+      return v;
+   };
+   // After 8 of the 15 squares have gone, all of them are squares of one color of the board.
+   int gone = 0;
+   for (uint32_t ty = 0; ty < 2; ++ty)
+      for (uint32_t tx = 0; tx < 8; ++tx)
+         if (!tileVisible(tx, ty, 8, 15))
+         {
+            ++gone;
+            CHECK(((tx + ty) & 1u) == 0);
+         }
+   CHECK(gone == 8);
+   // At the end exactly one square is left, and it is one of the other color.
+   int left = 0;
+   for (uint32_t ty = 0; ty < 2; ++ty)
+      for (uint32_t tx = 0; tx < 8; ++tx)
+         if (tileVisible(tx, ty, 15, 15))
+         {
+            ++left;
+            CHECK(((tx + ty) & 1u) == 1);
+         }
+   CHECK(left == 1);
+   // Squares of 2 x 2 on 128 x 32: 1024 squares, 255 steps.
+   CHECK(makeNamed("checkerboard", "2", 128, 32)->maxSteps() == 255);
+   // An edge that is not a multiple of the square: the partial squares count.
+   CHECK(makeNamed("checkerboard", "16", 129, 33)->maxSteps() == 9 * 3 - 1);
+}
+
+// Through the window to another frame: the effects that keep every pixel go through both frames.
+void testGoingThroughBothFrames()
+{
+   for (const char* id : {"pixelate", "zoom"})
+   {
+      resetProject(128, 32, true);
+      g_frames[1] = makeSecondFrame(true);
+      selectTwo(0, 1);
+      openMenu();
+      change("target", "frame");
+      change("transition", id);
+      if (transitions::same(id, "zoom"))
+         change("option", "in");
+      const Form::Field* f = fieldOf("frames");
+      CHECK(f && !choiceValues(*f).empty());
+      change("frames", "4");
+      change("placement", "end");
+      closeForm(true);
+      CHECK(g_frames.size() == 6);
+      const Frame& a = g_frames[0];
+      const Frame& b = g_frames[1];
+      for (size_t k = 0; g_frames.size() == 6 && k < 4; ++k)
+      {
+         const Frame& n = g_frames[2 + k];
+         long fromFirst = 0, fromSecond = 0;
+         for (size_t p = 0; p < n.sd.size(); ++p)
+         {
+            // Every pixel comes from one frame or the other, with its shade and zone (the second
+            // frame's zone of set 0 now in set 5).
+            long matchFirst = 0, matchSecond = 0;
+            for (size_t q = 0; q < a.sd.size() && !(matchFirst && matchSecond); ++q)
+            {
+               if (n.sd[p] == a.sd[q] && n.original[p] == a.original[q] && n.zones[p] == a.zones[q])
+                  matchFirst = 1;
+               if (n.sd[p] == b.sd[q] && n.original[p] == b.original[q] &&
+                   n.zones[p] == (b.zones[q] == 0 ? 4 : b.zones[q]))
+                  matchSecond = 1;
+            }
+            CHECK(matchFirst || matchSecond);
+            fromFirst += matchFirst && !matchSecond;
+            fromSecond += matchSecond && !matchFirst;
+         }
+         // The first two frames show only the first frame's pixels, the last two only the other's.
+         if (k < 2)
+            CHECK(fromSecond == 0);
+         else
+            CHECK(fromFirst == 0);
+      }
+   }
+}
+
 void testScene()
 {
    // The new frames become a scene that the starting frame starts; the plain frames go again.
@@ -2175,6 +2374,11 @@ int main()
    testAnotherFrame();
    testPreviewShowsDynamicContent();
    testFadeKeepsTheOriginalShades();
+   testPixelate();
+   testZoom();
+   testWave();
+   testCheckerboard();
+   testGoingThroughBothFrames();
    // Every transition through the window, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};

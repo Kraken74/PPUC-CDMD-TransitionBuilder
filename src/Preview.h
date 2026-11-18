@@ -45,7 +45,11 @@ void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t widt
             width - 1, static_cast<uint32_t>(static_cast<uint64_t>(from.x) * width / originalWidth) + insideX);
          const uint32_t sourceY = std::min(
             height - 1, static_cast<uint32_t>(static_cast<uint64_t>(from.y) * height / originalHeight) + insideY);
-         out[static_cast<size_t>(y) * width + x] = recolor(source[static_cast<size_t>(sourceY) * width + sourceX]);
+         const size_t sourceIndex = static_cast<size_t>(sourceY) * width + sourceX;
+         if (from.second && under && under->size() == source.size())
+            out[static_cast<size_t>(y) * width + x] = (*under)[sourceIndex]; // the other frame, as it is
+         else
+            out[static_cast<size_t>(y) * width + x] = recolor(source[sourceIndex]);
       }
 }
 
