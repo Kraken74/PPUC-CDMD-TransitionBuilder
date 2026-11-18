@@ -25,6 +25,7 @@
 #include <memory>
 #include <numeric>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace transitions {
@@ -34,9 +35,11 @@ inline constexpr uint32_t kMaxSteps = 255;
 
 struct Rule
 {
-   bool visible; // false: the pixel is black, x and y mean nothing
-   uint32_t x;   // the pixel of the starting frame it shows
+   bool visible;         // false: the pixel is black, x and y mean nothing
+   uint32_t x;           // the pixel of the starting frame it shows
    uint32_t y;
+   bool second = false;  // the pixel is taken from the other frame (x and y are then a place in that
+                         // one), in a transition to another frame that goes through both pictures
 };
 
 // What an effect needs to know about the frame it starts from.
@@ -64,6 +67,11 @@ public:
    virtual uint32_t maxSteps() const = 0;
    // Why there is a most, in a few words, for the window that asks for the number of frames.
    virtual const char* limitReason() const = 0;
+
+   // False for the effects that keep every pixel on the screen (the pixelate, the zoom in): they
+   // only change what the pixels show, so nothing is taken away for a black or white fill or for
+   // another frame to show through. In a transition to another frame they go through both pictures.
+   virtual bool takesPixelsAway() const { return true; }
 
    // Where the pixel (x, y) of the new frame comes from (the identity by default).
    virtual Rule rule(uint32_t x, uint32_t y, uint32_t /*step*/, uint32_t /*steps*/) const
@@ -247,6 +255,209 @@ private:
    uint32_t m_width;
    std::vector<uint32_t> m_ranks;
    uint64_t m_keep;
+};
+
+// ---- Steps through a ladder -----------------------------------------------------------------
+
+// Some effects have a ladder of `levels` states, each one stronger than the one before (a bigger
+// block, a stronger zoom, a wider wave). Frame `step` of `steps` takes the level `step * levels /
+// steps`, rounded up: with at most `levels` steps every frame gets a level of its own, the last
+// frame always gets the strongest level, and with more steps a level has to repeat.
+inline uint32_t ladderLevel(uint32_t levels, uint32_t step, uint32_t steps)
+{
+   return static_cast<uint32_t>((static_cast<uint64_t>(step) * levels + steps - 1u) / steps);
+}
+
+// ---- Pixelate -------------------------------------------------------------------------------
+
+// The picture turns into bigger and bigger blocks, each one showing the pixel at its middle. To
+// another frame it goes through both: the first frame's blocks grow, then the other frame comes
+// out of the largest blocks and shrinks back to pixels.
+class Pixelate final : public Effect
+{
+public:
+   Pixelate(uint32_t width, uint32_t height, bool toFrame)
+      : m_width(width), m_height(height), m_toFrame(toFrame),
+        m_blocks(std::max(2u, std::min(width, height)) - 1u) // block sizes 2 .. min(width, height)
+   {
+   }
+   uint32_t maxSteps() const override { return std::min(kMaxSteps, levels()); }
+   const char* limitReason() const override { return "the blocks can only grow so big"; }
+   bool takesPixelsAway() const override { return false; }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
+   {
+      const uint32_t level = ladderLevel(levels(), step, steps);
+      const bool second = level > m_blocks;
+      const uint32_t block = 1u + (second ? 2u * m_blocks + 1u - level : level); // 2 .. largest
+      return {true, std::min(m_width - 1u, x / block * block + block / 2u),
+              std::min(m_height - 1u, y / block * block + block / 2u), second};
+   }
+
+private:
+   uint32_t levels() const { return m_toFrame ? 2u * m_blocks : m_blocks; }
+   uint32_t m_width, m_height;
+   bool m_toFrame;
+   uint32_t m_blocks;
+};
+
+// ---- Zoom -----------------------------------------------------------------------------------
+
+// Zoom Out: the picture shrinks toward the middle of the frame (nothing is shown around it, so a
+// black or white fill, or the other frame, shows there). The most it shrinks is to 1/16 of the width.
+class ZoomOut final : public Effect
+{
+public:
+   ZoomOut(uint32_t width, uint32_t height)
+      : m_width(width), m_height(height), m_smallest(std::max(2u, width / 16u))
+   {
+   }
+   uint32_t maxSteps() const override { return m_width > m_smallest ? std::min(kMaxSteps, m_width - m_smallest) : 0; }
+   const char* limitReason() const override { return "the picture shrinks one pixel of its width at a time"; }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
+   {
+      const uint32_t level = ladderLevel(m_width - m_smallest, step, steps);
+      const uint32_t w = m_width - level; // the picture's size at this step
+      const uint32_t h = std::max(1u, static_cast<uint32_t>((static_cast<uint64_t>(m_height) * w + m_width / 2u) / m_width));
+      const uint32_t x0 = (m_width - w) / 2u;
+      const uint32_t y0 = (m_height - h) / 2u;
+      if (x < x0 || x >= x0 + w || y < y0 || y >= y0 + h)
+         return {false, 0, 0};
+      return {true, std::min(m_width - 1u, static_cast<uint32_t>(static_cast<uint64_t>(x - x0) * m_width / w)),
+              std::min(m_height - 1u, static_cast<uint32_t>(static_cast<uint64_t>(y - y0) * m_height / h))};
+   }
+
+private:
+   uint32_t m_width, m_height, m_smallest;
+};
+
+// Zoom In: the picture grows toward you, a smaller and smaller part of the middle fills the frame
+// (down to 1/8 of the width). To another frame it zooms into the first frame, then the other
+// frame zooms back out to full size.
+class ZoomIn final : public Effect
+{
+public:
+   ZoomIn(uint32_t width, uint32_t height, bool toFrame)
+      : m_width(width), m_height(height), m_toFrame(toFrame), m_smallest(std::max(4u, width / 8u))
+   {
+   }
+   uint32_t maxSteps() const override { return std::min(kMaxSteps, levels()); }
+   const char* limitReason() const override { return "the picture grows one pixel of its width at a time"; }
+   bool takesPixelsAway() const override { return false; }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
+   {
+      const uint32_t depth = m_width > m_smallest ? m_width - m_smallest : 0;
+      const uint32_t level = ladderLevel(levels(), step, steps);
+      const bool second = level > depth;
+      const uint32_t zoom = second ? 2u * depth + 1u - level : level; // 1 .. depth
+      const uint32_t w = m_width - zoom; // the part of the picture that fills the frame
+      const uint32_t h = std::max(2u, static_cast<uint32_t>((static_cast<uint64_t>(m_height) * w + m_width / 2u) / m_width));
+      const uint32_t x0 = (m_width - w) / 2u;
+      const uint32_t y0 = m_height > h ? (m_height - h) / 2u : 0u;
+      return {true, std::min(m_width - 1u, x0 + static_cast<uint32_t>(static_cast<uint64_t>(x) * w / m_width)),
+              std::min(m_height - 1u, y0 + static_cast<uint32_t>(static_cast<uint64_t>(y) * h / m_height)), second};
+   }
+
+private:
+   uint32_t levels() const
+   {
+      const uint32_t depth = m_width > m_smallest ? m_width - m_smallest : 0;
+      return m_toFrame ? 2u * depth : depth;
+   }
+   uint32_t m_width, m_height;
+   bool m_toFrame;
+   uint32_t m_smallest;
+};
+
+// ---- Wave -----------------------------------------------------------------------------------
+
+// A wave of whole numbers: `amplitude` times a smooth wave of `period` (a multiple of 4) places,
+// rounded to whole pixels. Two parabolas, one up and one down, so that it is exact in integers
+// and the same on every compiler.
+inline int32_t waveShift(uint32_t place, uint32_t period, uint32_t amplitude)
+{
+   const uint32_t half = period / 2u;
+   const uint32_t at = place % period;
+   const bool down = at >= half;
+   const uint64_t q = down ? at - half : at;
+   const uint64_t hump = 4ull * q * (half - q); // 0 .. half * half (reached at the quarter)
+   const int64_t magnitude = static_cast<int64_t>((hump * amplitude + static_cast<uint64_t>(half) * half / 2u) /
+                                                  (static_cast<uint64_t>(half) * half));
+   return static_cast<int32_t>(down ? -magnitude : magnitude);
+}
+
+// Wave: the rows (Horizontal) slide sideways, or the columns (Vertical) slide up and down, by a
+// wave that grows from one step to the next, until the crests of the wave have left the frame.
+// What the wave uncovers at the edges is black (or white, or the other frame).
+class Wave final : public Effect
+{
+public:
+   Wave(bool horizontal, uint32_t width, uint32_t height)
+      : m_horizontal(horizontal), m_width(width), m_height(height)
+   {
+      const uint32_t across = horizontal ? height : width; // the wave runs along this axis
+      // One wave over the height for the rows, four over the width for the columns.
+      m_period = std::max(8u, (horizontal ? across : across / 4u) / 4u * 4u);
+   }
+   uint32_t maxSteps() const override { return std::min(kMaxSteps, m_horizontal ? m_width : m_height); }
+   const char* limitReason() const override { return "the wave grows one pixel at a time"; }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
+   {
+      const uint32_t amplitude = ladderLevel(m_horizontal ? m_width : m_height, step, steps);
+      if (m_horizontal)
+      {
+         const int64_t from = static_cast<int64_t>(x) - waveShift(y, m_period, amplitude);
+         return from >= 0 && from < m_width ? Rule{true, static_cast<uint32_t>(from), y} : Rule{false, 0, 0};
+      }
+      const int64_t from = static_cast<int64_t>(y) - waveShift(x, m_period, amplitude);
+      return from >= 0 && from < m_height ? Rule{true, x, static_cast<uint32_t>(from)} : Rule{false, 0, 0};
+   }
+
+private:
+   bool m_horizontal;
+   uint32_t m_width, m_height;
+   uint32_t m_period = 8;
+};
+
+// ---- Checkerboard ---------------------------------------------------------------------------
+
+// Checkerboard: the frame is cut into squares, and they disappear one by one: first the squares of
+// one color of a checkerboard, in a sweep from the top left corner, then the others. One square is
+// left at the end.
+class Checkerboard final : public Effect
+{
+public:
+   Checkerboard(uint32_t size, uint32_t width, uint32_t height)
+      : m_size(std::max(1u, size)), m_across((width + m_size - 1u) / m_size)
+   {
+      const uint32_t down = (height + m_size - 1u) / m_size;
+      const size_t count = static_cast<size_t>(m_across) * down;
+      std::vector<uint32_t> index(count);
+      std::iota(index.begin(), index.end(), 0u);
+      auto key = [&](uint32_t i) {
+         const uint32_t tx = i % m_across, ty = i / m_across;
+         return std::make_tuple((tx + ty) & 1u, tx + ty, ty);
+      };
+      std::sort(index.begin(), index.end(), [&](uint32_t a, uint32_t b) { return key(a) < key(b); });
+      m_ranks.assign(count, 0);
+      for (size_t rank = 0; rank < count; ++rank)
+         m_ranks[index[rank]] = static_cast<uint32_t>(rank);
+   }
+   uint32_t maxSteps() const override
+   {
+      return m_ranks.size() > 1 ? static_cast<uint32_t>(std::min<uint64_t>(kMaxSteps, m_ranks.size() - 1u)) : 0;
+   }
+   const char* limitReason() const override { return "each step has to take at least one square"; }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
+   {
+      const uint64_t vanish = m_ranks.size() - 1u;
+      const uint64_t threshold = (vanish * step + steps / 2u) / steps;
+      const size_t tile = static_cast<size_t>(y / m_size) * m_across + x / m_size;
+      return {m_ranks[tile] >= threshold, x, y};
+   }
+
+private:
+   uint32_t m_size, m_across;
+   std::vector<uint32_t> m_ranks;
 };
 
 // ---- Moving along an axis -------------------------------------------------------------------
@@ -618,6 +829,25 @@ inline std::unique_ptr<Effect> makeBlinds(const char* option, const SourceInfo& 
 {
    return std::make_unique<Blinds>(!same(option, "vertical"), s.width, s.height);
 }
+inline std::unique_ptr<Effect> makeCheckerboard(const char* option, const SourceInfo& s)
+{
+   const uint32_t size = same(option, "16") ? 16u : same(option, "8") ? 8u : same(option, "4") ? 4u : 2u;
+   return std::make_unique<Checkerboard>(size, s.width, s.height);
+}
+inline std::unique_ptr<Effect> makePixelate(const char*, const SourceInfo& s)
+{
+   return std::make_unique<Pixelate>(s.width, s.height, s.toFrame);
+}
+inline std::unique_ptr<Effect> makeWave(const char* option, const SourceInfo& s)
+{
+   return std::make_unique<Wave>(!same(option, "vertical"), s.width, s.height);
+}
+inline std::unique_ptr<Effect> makeZoom(const char* option, const SourceInfo& s)
+{
+   if (same(option, "out"))
+      return std::make_unique<ZoomOut>(s.width, s.height);
+   return std::make_unique<ZoomIn>(s.width, s.height, s.toFrame);
+}
 inline std::unique_ptr<Effect> makeFade(const char*, const SourceInfo& s)
 {
    return std::make_unique<Fade>(s.toWhite, s);
@@ -642,6 +872,12 @@ inline const Option kDirectionOptions[] = {
 inline const Option kOrientationOptions[] = {
    {"horizontal", "Horizontal"}, {"vertical", "Vertical"},
 };
+inline const Option kSquareOptions[] = {
+   {"2", "2 x 2"}, {"4", "4 x 4"}, {"8", "8 x 8"}, {"16", "16 x 16"},
+};
+inline const Option kZoomOptions[] = {
+   {"in", "In"}, {"out", "Out"},
+};
 inline const Option kWipeOptions[] = {
    {"up", "Up"}, {"down", "Down"}, {"left", "Left"}, {"right", "Right"},
    {"centre_out", "Centre-Out"}, {"edge_in", "Edge-In"}, {"spiral", "Spiral"},
@@ -659,6 +895,11 @@ inline const Transition kTransitions[] = {
     "Bars appear at regular intervals and grow wider until only thin slits of the picture are "
     "left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by side.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
+   {"checkerboard", "Checkerboard",
+    "The picture is cut into squares that disappear one by one: first the squares of one color "
+    "of a checkerboard, in a sweep from the top left corner, then the others. One square is "
+    "left at the end.",
+    "Square Size", kSquareOptions, TB_COUNT(kSquareOptions), &makeCheckerboard},
    {"dissolve", "Dissolve",
     "The picture dissolves pixel by pixel. Orderly: pixels disappear in a regular pattern. "
     "Random: pixels disappear at random.",
@@ -668,6 +909,10 @@ inline const Transition kTransitions[] = {
     "almost black or almost white, but not quite. Color rotations of the new frames are "
     "removed, because they would not fade.",
     nullptr, nullptr, 0, &makeFade},
+   {"pixelate", "Pixelate",
+    "The picture turns into bigger and bigger blocks. To another frame: the first frame turns "
+    "into blocks, then the other frame comes out of the blocks and sharpens.",
+    nullptr, nullptr, 0, &makePixelate},
    {"slide", "Slide",
     "The whole picture slides off the screen in the direction you choose. A thin strip of it "
     "is left at the end.",
@@ -677,14 +922,24 @@ inline const Transition kTransitions[] = {
     "each is left at the edges. Horizontal: cut across, the top half slides up and the bottom "
     "half down. Vertical: cut down, the left half slides left and the right half right.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
+   {"wave", "Wave",
+    "The picture ripples. Horizontal: the rows slide sideways in a wave that grows. Vertical: "
+    "the columns slide up and down in a wave that grows. The crests of the wave leave the frame "
+    "at the end.",
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeWave},
    {"wipe", "Wipe",
     "A bar wipes over the picture in the direction you choose (Left: it comes in from the right "
     "edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture "
     "closes in from the outside edges. Spiral: a spiral winds in from the top left corner. A "
     "little of the picture is left at the end.",
     "Wipe Type", kWipeOptions, TB_COUNT(kWipeOptions), &makeWipe},
+   {"zoom", "Zoom",
+    "Zoom In: the picture grows toward you, a smaller and smaller part of the middle fills the "
+    "frame. To another frame: it zooms into the first frame, then the other frame zooms out to "
+    "full size. Zoom Out: the picture shrinks toward the middle.",
+    "Zoom", kZoomOptions, TB_COUNT(kZoomOptions), &makeZoom},
 };
-inline constexpr size_t kTransitionCount = 7;
+inline constexpr size_t kTransitionCount = 11;
 static_assert(sizeof(kTransitions) / sizeof(kTransitions[0]) == kTransitionCount, "update kTransitionCount");
 
 #undef TB_COUNT
