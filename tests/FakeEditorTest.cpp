@@ -2098,6 +2098,19 @@ void testPixelate()
    CHECK(first.x == 5 && first.y == 7); // 2 x 2 blocks: the pixel at the middle (odd) of the block
    CHECK(e->rule(4, 6, 1, 31).x == 5 && e->rule(4, 6, 1, 31).y == 7);
 
+   // It eases in: with 8 frames the first ones have small blocks, the growth speeds up, the last one is the largest.
+   uint32_t previous = 0;
+   for (uint32_t step = 1; step <= 8; ++step)
+   {
+      uint32_t size = 0; // the width of the first block
+      for (uint32_t x = 0; x < 128; ++x)
+         size += e->rule(x, 0, step, 8).x == e->rule(0, 0, step, 8).x;
+      CHECK(size > previous);                              // always bigger than the frame before
+      CHECK(step < 8 ? size <= 2u * (step * step * 31u / 64u + 2u) : size == 32);
+      previous = size;
+   }
+   CHECK(e->rule(0, 0, 1, 8).x <= 2 && e->rule(0, 0, 4, 8).x <= 8); // not big by the half way
+
    // To another frame: twice the levels, the blocks grow on the first frame, then shrink on the other.
    auto both = makeNamed("pixelate", "", 128, 32, true);
    CHECK(both->maxSteps() == 62);
@@ -2159,20 +2172,28 @@ void testWave()
 
    // Horizontal: the rows slide sideways (one wave over the 32 rows), what is uncovered is taken away.
    auto h = makeNamed("wave", "horizontal", 128, 32);
-   CHECK(h->maxSteps() == 128);
-   const transitions::Rule crest = h->rule(50, 8, 20, 128); // row 8 is a crest: moved right by 20
-   CHECK(crest.visible && crest.x == 30 && crest.y == 8);
-   CHECK(!h->rule(10, 8, 20, 128).visible);                 // uncovered on the left
-   const transitions::Rule trough = h->rule(50, 24, 20, 128); // row 24: moved left by 20
-   CHECK(trough.visible && trough.x == 70 && trough.y == 24);
-   const transitions::Rule still = h->rule(50, 16, 20, 128); // row 16 does not move
-   CHECK(still.visible && still.x == 50 && still.y == 16);
+   CHECK(h->maxSteps() == 127);
+   // Every row moves right by the pull (20) at least; a crest row (8) by half of it more, a trough row (24) not.
+   const transitions::Rule crest = h->rule(50, 8, 20, 127);
+   CHECK(crest.visible && crest.x == 10 && crest.y == 8); // 50 - 20 - 10 - 10
+   CHECK(!h->rule(39, 8, 20, 127).visible);                // uncovered on the left
+   const transitions::Rule trough = h->rule(50, 24, 20, 127);
+   CHECK(trough.visible && trough.x == 30 && trough.y == 24);
+   const transitions::Rule still = h->rule(50, 16, 20, 127); // row 16: on the wave's middle
+   CHECK(still.visible && still.x == 20 && still.y == 16);
+   // At the end only a sliver of the trough rows is left: one column, none of the crest rows.
+   long left = 0;
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+         left += h->rule(x, y, 127, 127).visible;
+   CHECK(left > 0 && left <= 32);
+   CHECK(h->rule(127, 24, 127, 127).visible && h->rule(127, 24, 127, 127).x == 0);
    // Vertical: the columns slide up and down (a period of 32 columns on 128), 32 steps for 32 rows.
    auto v = makeNamed("wave", "vertical", 128, 32);
-   CHECK(v->maxSteps() == 32);
-   const transitions::Rule down = v->rule(8, 20, 8, 32); // column 8 is a crest: moved down by 8
-   CHECK(down.visible && down.x == 8 && down.y == 12);
-   CHECK(!v->rule(8, 3, 8, 32).visible);
+   CHECK(v->maxSteps() == 31);
+   const transitions::Rule down = v->rule(8, 20, 8, 31); // column 8 is a crest: moved down by 8 + 4 + 4
+   CHECK(down.visible && down.x == 8 && down.y == 4);
+   CHECK(!v->rule(8, 3, 8, 31).visible);
 }
 
 void testCheckerboard()

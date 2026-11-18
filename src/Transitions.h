@@ -286,7 +286,7 @@ public:
    bool takesPixelsAway() const override { return false; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
    {
-      const uint32_t level = ladderLevel(levels(), step, steps);
+      const uint32_t level = easedLevel(step, steps);
       const bool second = level > m_blocks;
       const uint32_t block = 1u + (second ? 2u * m_blocks + 1u - level : level); // 2 .. largest
       return {true, std::min(m_width - 1u, x / block * block + block / 2u),
@@ -295,6 +295,23 @@ public:
 
 private:
    uint32_t levels() const { return m_toFrame ? 2u * m_blocks : m_blocks; }
+   // The blocks start growing slowly and speed up (a square of the progress). Never slower than one
+   // size per frame, so that every frame still differs from the one before.
+   uint32_t easeIn(uint32_t n, uint32_t d, uint32_t span) const
+   {
+      return static_cast<uint32_t>((static_cast<uint64_t>(span) * n * n + static_cast<uint64_t>(d) * d - 1u) /
+                                   (static_cast<uint64_t>(d) * d));
+   }
+   uint32_t easedLevel(uint32_t step, uint32_t steps) const
+   {
+      if (!m_toFrame)
+         return std::min(m_blocks, std::max(step, easeIn(step, steps, m_blocks)));
+      if (2u * step <= steps) // the first frame's blocks grow
+         return std::min(m_blocks, std::max(step, easeIn(2u * step, steps, m_blocks)));
+      const uint32_t back = steps - step; // the other frame's blocks shrink, slowly at the end
+      const uint32_t size = std::max(back + 1u, easeIn(2u * back, steps, m_blocks));
+      return 2u * m_blocks + 1u - std::min(size, m_blocks);
+   }
    uint32_t m_width, m_height;
    bool m_toFrame;
    uint32_t m_blocks;
@@ -385,9 +402,10 @@ inline int32_t waveShift(uint32_t place, uint32_t period, uint32_t amplitude)
    return static_cast<int32_t>(down ? -magnitude : magnitude);
 }
 
-// Wave: the rows (Horizontal) slide sideways, or the columns (Vertical) slide up and down, by a
-// wave that grows from one step to the next, until the crests of the wave have left the frame.
-// What the wave uncovers at the edges is black (or white, or the other frame).
+// Wave: the rows (Horizontal) slide sideways, or the columns (Vertical) slide up and down, each by a
+// different amount, so the picture turns into a wavy curtain that is pulled out of the frame. The
+// wave is strongest at the end, when only thin slivers of the troughs are left. What it uncovers
+// is black (or white, or the other frame).
 class Wave final : public Effect
 {
 public:
@@ -398,21 +416,30 @@ public:
       // One wave over the height for the rows, four over the width for the columns.
       m_period = std::max(8u, (horizontal ? across : across / 4u) / 4u * 4u);
    }
-   uint32_t maxSteps() const override { return std::min(kMaxSteps, m_horizontal ? m_width : m_height); }
-   const char* limitReason() const override { return "the wave grows one pixel at a time"; }
+   uint32_t maxSteps() const override { return std::min(kMaxSteps, levels()); }
+   const char* limitReason() const override { return "the wave moves one pixel at a time"; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
    {
-      const uint32_t amplitude = ladderLevel(m_horizontal ? m_width : m_height, step, steps);
+      // Every row is pulled out by `pull` at least; the wave adds up to the same again on its crests.
+      // So the crests go twice as fast as the troughs, and the troughs are the last to leave.
+      const uint32_t pull = ladderLevel(levels(), step, steps);
+      const uint32_t amplitude = pull / 2u;
       if (m_horizontal)
       {
-         const int64_t from = static_cast<int64_t>(x) - waveShift(y, m_period, amplitude);
+         const int64_t from = static_cast<int64_t>(x) - pull - amplitude - waveShift(y, m_period, amplitude);
          return from >= 0 && from < m_width ? Rule{true, static_cast<uint32_t>(from), y} : Rule{false, 0, 0};
       }
-      const int64_t from = static_cast<int64_t>(y) - waveShift(x, m_period, amplitude);
+      const int64_t from = static_cast<int64_t>(y) - pull - amplitude - waveShift(x, m_period, amplitude);
       return from >= 0 && from < m_height ? Rule{true, x, static_cast<uint32_t>(from)} : Rule{false, 0, 0};
    }
 
 private:
+   // The slowest rows are pulled out one pixel per step, until one column (or row) is left.
+   uint32_t levels() const
+   {
+      const uint32_t extent = m_horizontal ? m_width : m_height;
+      return extent > 1u ? extent - 1u : 0u;
+   }
    bool m_horizontal;
    uint32_t m_width, m_height;
    uint32_t m_period = 8;
