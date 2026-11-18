@@ -85,9 +85,12 @@ All of it, frames and scene, is one step of the editor's history.
 ## Installing it
 
 1. Get the plugin folder `TransitionFX` (see "Getting the plugin" below). It contains
-   `plugin.cfg` and `plugin-transitionfx64.dll`.
+   `plugin.cfg` and the plugin libraries: `plugin-transitionfx64.dll` (Windows x64),
+   `plugin-transitionfx.dll` (Windows x86), `plugin-transitionfx.so` (Linux x64 and aarch64) and
+   `plugin-transitionfx.dylib` (macOS arm64). The folder from the `TransitionFX-all-platforms`
+   download holds all of them; the editor loads the one that fits the computer.
 2. In the editor, open `Settings -> Plugins` and click `Open Folder`. Put the whole
-   `TransitionFX` folder into that folder (usually
+   `TransitionFX` folder into that folder (on Windows usually
    `%APPDATA%\ppuc.org\PPUC Colorizing DMD\plugins`), so that `plugin.cfg` is at
    `...\plugins\TransitionFX\plugin.cfg`.
    If you used this plugin under its earlier name, **delete the old `TransitionBuilder` folder**
@@ -98,17 +101,24 @@ All of it, frames and scene, is one step of the editor's history.
 If the plugin does not load, `Settings -> Plugins` names the reason, and `Help -> Plugin Log`
 has more.
 
-## Getting the plugin (Windows, no programming tools needed)
+On macOS, a library downloaded from the internet can be blocked until you allow it. If the editor
+says it cannot load the plugin, run `xattr -dr com.apple.quarantine <the TransitionFX folder>` in
+Terminal and restart the editor.
 
-GitHub builds it for you:
+## Getting the plugin
 
-1. Make a free account at github.com and create a new repository (private is fine).
-2. Upload everything in this folder to it, including the hidden `.github` folder
-   (`Add file -> Upload files`; drag the whole folder in).
-3. Open the repository's `Actions` tab. The `Build Windows plugin` run starts by itself after
-   the upload (or choose it and click `Run workflow`).
-4. When the run is green, open it and download `TransitionFX-windows-x64` under
-   `Artifacts`. Unpack it: it holds the `TransitionFX` folder from the steps above.
+GitHub builds it for you, for Windows (x64 and x86), Linux (x64 and aarch64) and macOS (arm64):
+
+1. Open the repository's `Actions` tab. The `Build plugin` run starts by itself after a push (or
+   choose it and click `Run workflow`).
+2. When the run is green, open it and download `TransitionFX-all-platforms` under `Artifacts`
+   (or the one for your platform, such as `TransitionFX-windows-x64`). Unpack it: it holds the
+   `TransitionFX` folder from the steps above.
+
+Every platform build also runs the tests. They come after the upload, so a failing test never
+hides the plugin, but a red job means something is wrong on that platform; the failing line says
+what. The Linux aarch64 build runs on GitHub's free ARM runner, which only public repositories
+get.
 
 ## Going to another frame
 
