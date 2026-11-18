@@ -88,6 +88,22 @@ struct Source
    std::vector<uint16_t> dynamicColors; // colors[set * colorCount + shade]
 };
 
+// The second frame of a transition to another frame, made to fit under the first: the dynamic
+// zones of both are on one plane, and the dynamic sets that both use for different colors have to
+// be told apart.
+struct Combined
+{
+   std::vector<uint8_t> zones1;       // the zones of the first frame on the plane of both (255: none)
+   std::vector<uint8_t> zones2;       // those of the second, its sets renamed where they clashed
+   uint32_t zonesWidth = 0;
+   uint32_t zonesHeight = 0;
+   bool hasZones = false;             // either frame has dynamic zones
+   // The dynamic sets the new frames get from the second frame: the colors of its sets as they
+   // are now numbered (the first frame's own sets come along when a frame is made like it).
+   std::vector<std::pair<uint32_t, std::vector<uint16_t>>> sets;
+   std::string caveat;
+};
+
 // The open window: the frame it starts from (read again whenever the current frame or the
 // project changes), and the effect its fields describe.
 struct Window
@@ -100,6 +116,13 @@ struct Window
    const transitions::Option* option = nullptr; // null for a transition without options
    std::unique_ptr<transitions::Effect> effect;
    bool toWhite = false; // the transition goes to white instead of black
+   // The transition goes to another frame: the frame you clicked last is the start, the other
+   // selected frame the end. `second` is then the end frame and `combined` how it fits under
+   // the first one.
+   bool toFrame = false;
+   Source second;
+   std::string secondProblem; // why there is no second frame; empty when there is one
+   Combined combined;
    // The number of frames the author asked for: the list shows it whenever the transition can
    // make that many, and the most it can make otherwise.
    std::string framesWanted;
@@ -160,12 +183,21 @@ std::string formValue(const char* key, const char* fallback)
 std::string optionKey(const transitions::Transition& transition) { return std::string("option_") + transition.id; }
 
 // What the author chose, in words: "Wipe (Spiral) to White".
-std::string describe(const transitions::Transition& transition, const transitions::Option* option, bool toWhite)
+std::string describe(const transitions::Transition& transition, const transitions::Option* option,
+                     const std::string& target)
 {
    std::string what = transition.label;
    if (option)
       what += std::string(" (") + option->label + ")";
-   return what + (toWhite ? " to White" : " to Black");
+   return what + " to " + target;
+}
+
+// What the window's "Transition to" says now: "Black", "White" or "frame 12".
+std::string targetName()
+{
+   if (g_window.toFrame)
+      return "frame " + std::to_string(g_window.second.frame);
+   return g_window.toWhite ? "White" : "Black";
 }
 
 // ---- Reading the frame ----------------------------------------------------------------------
@@ -228,10 +260,38 @@ std::string loadSource(uint32_t frame, Source& source)
 }
 
 // What the effects need to know about the frame.
-transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite)
+// The largest difference between two colors of the same pixel of the two frames, in units of a
+// 5-bit channel (green has 6 bits, so it counts half).
+uint32_t crossSpanOf(const Source& a, const Source& b)
+{
+   uint32_t span = 0;
+   for (size_t i = 0; i < a.planes.size() && i < b.planes.size(); ++i)
+   {
+      const std::vector<uint16_t>& x = a.planes[i].pixels;
+      const std::vector<uint16_t>& y = b.planes[i].pixels;
+      for (size_t k = 0; k < x.size() && k < y.size(); ++k)
+      {
+         if (x[k] == y[k])
+            continue;
+         auto diff = [](int u, int v) { return static_cast<uint32_t>(u > v ? u - v : v - u); };
+         const uint32_t dr = diff((x[k] >> 11) & 31, (y[k] >> 11) & 31);
+         const uint32_t dg = (diff((x[k] >> 5) & 63, (y[k] >> 5) & 63) + 1u) / 2u;
+         const uint32_t db = diff(x[k] & 31, y[k] & 31);
+         span = std::max({span, dr, dg, db});
+      }
+   }
+   return span;
+}
+
+transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const Source* second = nullptr)
 {
    transitions::SourceInfo info;
    info.toWhite = toWhite;
+   if (second)
+   {
+      info.toFrame = true;
+      info.crossSpan = crossSpanOf(source, *second);
+   }
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
@@ -248,7 +308,129 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite)
             seen[pixel] = true;
             info.colors.push_back(pixel);
          }
+   // The colors the dynamic zones show are colors of the frame too (its colorized picture is
+   // black where a zone colors the pixel).
+   if (!source.zones.empty() && source.colorCount > 0)
+   {
+      bool used[CDMDPI_DYNAMIC_SETS] = {};
+      for (uint8_t set : source.zones)
+         if (set < CDMDPI_DYNAMIC_SETS)
+            used[set] = true;
+      for (uint32_t set = 0; set < CDMDPI_DYNAMIC_SETS; ++set)
+         for (uint32_t shade = 0; used[set] && shade < source.colorCount; ++shade)
+         {
+            const size_t index = static_cast<size_t>(set) * source.colorCount + shade;
+            if (index < source.dynamicColors.size() && !seen[source.dynamicColors[index]])
+            {
+               seen[source.dynamicColors[index]] = true;
+               info.colors.push_back(source.dynamicColors[index]);
+            }
+         }
+   }
    return info;
+}
+
+// Puts the second frame under the first: the zones of both on one plane, and where both use the
+// same dynamic set for different colors, the second frame's zones moved to a set nobody uses, with
+// that set's colors, so the first frame's set gradually gives way to the second frame's.
+void combine(const Source& a, const Source& b, Combined& out)
+{
+   out = Combined{};
+   if (a.zones.empty() && b.zones.empty())
+      return;
+   out.hasZones = true;
+   out.zonesWidth = a.zones.empty() ? b.zonesWidth : a.zonesWidth;
+   out.zonesHeight = a.zones.empty() ? b.zonesHeight : a.zonesHeight;
+   const size_t size = static_cast<size_t>(out.zonesWidth) * out.zonesHeight;
+   out.zones1 = a.zones.empty() ? std::vector<uint8_t>(size, 255) : a.zones;
+   out.zones2 = b.zones.empty() ? std::vector<uint8_t>(size, 255) : b.zones;
+
+   bool used1[CDMDPI_DYNAMIC_SETS] = {};
+   bool used2[CDMDPI_DYNAMIC_SETS] = {};
+   for (uint8_t set : out.zones1)
+      if (set < CDMDPI_DYNAMIC_SETS)
+         used1[set] = true;
+   for (uint8_t set : out.zones2)
+      if (set < CDMDPI_DYNAMIC_SETS)
+         used2[set] = true;
+
+   const uint32_t count = a.colorCount;
+   auto colorsOf = [&](const Source& source, uint32_t set) {
+      std::vector<uint16_t> colors;
+      if (count > 0 && static_cast<size_t>(set + 1) * count <= source.dynamicColors.size())
+         colors.assign(source.dynamicColors.begin() + static_cast<size_t>(set) * count,
+                       source.dynamicColors.begin() + static_cast<size_t>(set + 1) * count);
+      return colors;
+   };
+
+   // Where the second frame's sets go: its own number unless the first frame uses that set for
+   // other colors.
+   uint32_t target[CDMDPI_DYNAMIC_SETS];
+   bool taken[CDMDPI_DYNAMIC_SETS] = {};
+   for (uint32_t set = 0; set < CDMDPI_DYNAMIC_SETS; ++set)
+      target[set] = set;
+   std::vector<uint32_t> clashing;
+   for (uint32_t set = 0; set < CDMDPI_DYNAMIC_SETS; ++set)
+   {
+      if (!used2[set])
+         continue;
+      if (used1[set] && colorsOf(a, set) != colorsOf(b, set))
+         clashing.push_back(set);
+      else if (!used1[set])
+         out.sets.emplace_back(set, colorsOf(b, set)); // its own number is free: just bring the colors
+   }
+   std::string lost;
+   for (uint32_t set : clashing)
+   {
+      uint32_t free = CDMDPI_NONE;
+      for (uint32_t f = 0; f < CDMDPI_DYNAMIC_SETS && free == CDMDPI_NONE; ++f)
+         if (!used1[f] && !used2[f] && !taken[f])
+            free = f;
+      if (free == CDMDPI_NONE)
+      {
+         target[set] = 255; // no set left: the zone cannot come along
+         lost += (lost.empty() ? "" : ", ") + std::to_string(set + 1);
+         continue;
+      }
+      taken[free] = true;
+      target[set] = free;
+      out.sets.emplace_back(free, colorsOf(b, set));
+      out.caveat += "Both frames use dynamic set " + std::to_string(set + 1) + " for different colors: frame " +
+                    std::to_string(b.frame) + "'s zones of that set use dynamic set " + std::to_string(free + 1) +
+                    " in the new frames.\n";
+   }
+   if (!lost.empty())
+      out.caveat += "No dynamic set was free for frame " + std::to_string(b.frame) + "'s set(s) " + lost +
+                    ": those zones are not in the new frames.\n";
+   for (uint8_t& set : out.zones2)
+      if (set < CDMDPI_DYNAMIC_SETS)
+         set = static_cast<uint8_t>(target[set]);
+}
+
+// The other selected frame: the frame you clicked last is the start, the other frame of exactly
+// two selected frames the end. Returns the reason there is none, or an empty string.
+std::string chooseSecond(uint32_t current, uint32_t& second)
+{
+   second = CDMDPI_NONE;
+   std::vector<uint32_t> selected;
+   uint32_t probe = 0;
+   const uint32_t total = g_editor->GetSelectedFrames(&probe, 0);
+   if (total > 0 && total < 100000)
+   {
+      selected.assign(total, 0);
+      selected.resize(std::min(total, g_editor->GetSelectedFrames(selected.data(), total)));
+   }
+   std::vector<uint32_t> others;
+   for (uint32_t frame : selected)
+      if (frame != current)
+         others.push_back(frame);
+   if (others.empty())
+      return "Ctrl+click a second frame in the frame list: the frame you clicked last is the start, the "
+             "other selected frame the end.";
+   if (others.size() > 1)
+      return "Select exactly two frames: the frame you clicked last is the start, the other one the end.";
+   second = others.front();
+   return std::string();
 }
 
 // ---- Making the frames ----------------------------------------------------------------------
@@ -269,6 +451,21 @@ struct Result
    std::string caveat;
 };
 
+// One colorized plane of a step: the source's, with the second frame underneath when the
+// transition goes to another frame, else the black or white fill.
+void drawPlane(const Plane& plane, const Plane* under, uint16_t fill, const transitions::Effect& effect,
+               uint32_t step, uint32_t steps, std::vector<uint16_t>& out)
+{
+   const Source& source = g_window.source;
+   if (under && effect.crossFades())
+      preview::renderCross<uint16_t>(plane.pixels, under->pixels, out, effect, step, steps, preview::mixColor);
+   else
+      preview::renderStep<uint16_t>(plane.pixels, out, plane.width, plane.height, source.originalWidth,
+                                    source.originalHeight, effect, step, steps, fill,
+                                    [&](uint16_t color) { return effect.color(color, step, steps); },
+                                    under ? &under->pixels : nullptr);
+}
+
 // Creates the transition from the window's source frame and effect. Returns an empty string
 // when it worked, else what went wrong (and nothing was changed).
 std::string createTransition(const Request& request, Result& result)
@@ -284,10 +481,20 @@ std::string createTransition(const Request& request, Result& result)
              " different frames from this frame.";
    if (scene && !g_window.scenesPossible)
       return "Scenes need a project of 128 x 32 frames.";
+   const bool toFrame = g_window.toFrame;
+   if (toFrame && !g_window.secondProblem.empty())
+      return g_window.secondProblem;
+   const Source& second = g_window.second;
+   const Combined& combined = g_window.combined;
 
    if (source.info.background != CDMDPI_NONE)
       result.caveat += "The frame shows a background. Where the background shows through, the pixels "
                        "stay as they are; only the frame's own pixels are changed by the transition.\n";
+   if (toFrame && second.info.background != CDMDPI_NONE)
+      result.caveat += "Frame " + std::to_string(second.frame) + " shows a background; the new frames keep the "
+                       "background of frame " + std::to_string(source.frame) + ".\n";
+   if (toFrame)
+      result.caveat += combined.caveat;
    if (scene && source.info.triggerId >= 50000 && source.info.triggerId <= 61999)
       result.caveat += "Frame " + std::to_string(source.frame) + " started scene " +
                        std::to_string(source.info.triggerId) + " before; it now starts the new scene.\n";
@@ -315,9 +522,17 @@ std::string createTransition(const Request& request, Result& result)
    {
       const std::string which = "frame " + std::to_string(step) + " of " + std::to_string(steps);
 
-      // The original: the pixels taken away get the shade of black (0) or white (the brightest).
-      preview::renderStep<uint8_t>(source.original, stepOriginal, ow, oh, ow, oh, effect, step, steps, fillShade,
-                                   [&](uint8_t shade) { return effect.shade(shade, step, steps); });
+      // The original: the pixels taken away get the shade of black (0) or white (the brightest),
+      // or the pixel of the other frame. A fade does not change the shades (a dynamic zone colors a pixel
+      // by its shade, so fading them would step through the zone's colors, besides fading those); a
+      // cross-fade switches from one frame's shades to the other's at the halfway point, with the zones.
+      if (toFrame && effect.crossFades())
+         preview::renderCross<uint8_t>(source.original, second.original, stepOriginal, effect, step, steps,
+                                       preview::mixZone);
+      else
+         preview::renderStep<uint8_t>(source.original, stepOriginal, ow, oh, ow, oh, effect, step, steps, fillShade,
+                                      [&](uint8_t shade) { return effect.shade(shade, step, steps); },
+                                      toFrame ? &second.original : nullptr);
 
       // The new frame is made like the source: its settings and pictures come along.
       uint32_t newFrame = CDMDPI_NONE;
@@ -333,11 +548,10 @@ std::string createTransition(const Request& request, Result& result)
          return fail("The editor refused to clear the comparison mask of " + which + ".");
 
       // The colorized planes follow the same decisions as the original.
-      for (const Plane& plane : source.planes)
+      for (size_t index = 0; index < source.planes.size(); ++index)
       {
-         preview::renderStep<uint16_t>(plane.pixels, stepPixels, plane.width, plane.height, ow, oh, effect, step,
-                                       steps, fillColor,
-                                       [&](uint16_t color) { return effect.color(color, step, steps); });
+         const Plane& plane = source.planes[index];
+         drawPlane(plane, toFrame ? &second.planes[index] : nullptr, fillColor, effect, step, steps, stepPixels);
          if (!g_editor->SetFramePicture(g_endpoint, newFrame, plane.hd, stepPixels.data(), nullptr,
                                         static_cast<uint32_t>(stepPixels.size())))
             return fail("The editor refused the picture of " + which + ".");
@@ -345,12 +559,29 @@ std::string createTransition(const Request& request, Result& result)
 
       // Dynamic zones color a pixel at run time from its shade, so they move with the picture,
       // and a pixel that was taken away must not stay in a zone.
-      if (!source.zones.empty())
+      if (toFrame ? combined.hasZones : !source.zones.empty())
       {
-         preview::renderStep<uint8_t>(source.zones, stepZones, source.zonesWidth, source.zonesHeight, ow, oh,
-                                      effect, step, steps, 255, [](uint8_t set) { return set; });
+         const std::vector<uint8_t>& zones = toFrame ? combined.zones1 : source.zones;
+         const uint32_t zw = toFrame ? combined.zonesWidth : source.zonesWidth;
+         const uint32_t zh = toFrame ? combined.zonesHeight : source.zonesHeight;
+         if (toFrame && effect.crossFades())
+            preview::renderCross<uint8_t>(zones, combined.zones2, stepZones, effect, step, steps, preview::mixZone);
+         else
+            preview::renderStep<uint8_t>(zones, stepZones, zw, zh, ow, oh, effect, step, steps, 255,
+                                         [](uint8_t set) { return set; }, toFrame ? &combined.zones2 : nullptr);
          if (!g_editor->SetDynamicZones(g_endpoint, newFrame, stepZones.data(), static_cast<uint32_t>(stepZones.size())))
             return fail("The editor refused the dynamic zones of " + which + ".");
+      }
+      if (toFrame)
+      {
+         // The sets the second frame's zones use, with their colors; and no color rotation, which
+         // would keep turning the colors of the first frame over the second one's pixels.
+         for (const auto& entry : combined.sets)
+            if (entry.second.size() == source.colorCount &&
+                !g_editor->SetDynamicColors(g_endpoint, newFrame, entry.first, entry.second.data(), source.colorCount))
+               return fail("The editor refused the dynamic colors of " + which + ".");
+         if (!g_editor->ClearColorRotations(g_endpoint, newFrame))
+            return fail("The editor refused to clear the color rotations of " + which + ".");
       }
 
       if (effect.changesColors())
@@ -377,7 +608,7 @@ std::string createTransition(const Request& request, Result& result)
       // were only the material: they go again. The scene's frames lie behind them, so they move
       // down by as many frames.
       ColorizingDMDScene definition{};
-      const std::string name = describe(*g_window.transition, g_window.option, g_window.toWhite);
+      const std::string name = describe(*g_window.transition, g_window.option, targetName());
       definition.sceneId = CDMDPI_NONE;
       definition.name = name.c_str();
       definition.groups = 1;
@@ -418,7 +649,9 @@ std::string createTransition(const Request& request, Result& result)
    }
 
    if (!g_editor->EndEdit(g_endpoint, 1))
-      return "The editor did not record the new frames (the status bar may say why). Nothing was changed.";
+      return "The editor did not record the new frames. In a team project a partner is probably working on "
+             "the frame order or on this frame: the status bar names who, for a few seconds. Merge the partners' changes first, or ask them. "
+             "Nothing was changed.";
 
    result.shown = created;
    g_editor->ShowFrames(result.shown.front(), result.shown.data(), static_cast<uint32_t>(result.shown.size()));
@@ -464,9 +697,45 @@ std::string placementChoices(bool scenes)
 void makeEffect()
 {
    g_window.effect.reset();
-   if (g_window.sourceProblem.empty() && g_window.transition)
-      g_window.effect =
-         g_window.transition->make(g_window.option ? g_window.option->id : "", sourceInfoOf(g_window.source, g_window.toWhite));
+   const bool ready = g_window.sourceProblem.empty() && (!g_window.toFrame || g_window.secondProblem.empty());
+   if (ready && g_window.transition)
+      g_window.effect = g_window.transition->make(
+         g_window.option ? g_window.option->id : "",
+         sourceInfoOf(g_window.source, g_window.toWhite, g_window.toFrame ? &g_window.second : nullptr));
+}
+
+// Reads the second frame (the other selected frame) and fits it under the first, when the window
+// goes to another frame.
+void loadSecond()
+{
+   g_window.second = Source{};
+   g_window.combined = Combined{};
+   g_window.secondProblem.clear();
+   if (!g_window.toFrame || !g_window.sourceProblem.empty())
+      return;
+   uint32_t frame = CDMDPI_NONE;
+   g_window.secondProblem = chooseSecond(g_window.source.frame, frame);
+   if (!g_window.secondProblem.empty())
+      return;
+   g_window.secondProblem = loadSource(frame, g_window.second);
+   if (!g_window.secondProblem.empty())
+      return;
+   const Source& a = g_window.source;
+   const Source& b = g_window.second;
+   bool same = a.originalWidth == b.originalWidth && a.originalHeight == b.originalHeight &&
+               a.planes.size() == b.planes.size();
+   for (size_t i = 0; same && i < a.planes.size(); ++i)
+      same = a.planes[i].hd == b.planes[i].hd && a.planes[i].width == b.planes[i].width &&
+             a.planes[i].height == b.planes[i].height && a.planes[i].pixels.size() == b.planes[i].pixels.size();
+   if (same && !a.zones.empty() && !b.zones.empty())
+      same = a.zonesWidth == b.zonesWidth && a.zonesHeight == b.zonesHeight;
+   if (!same)
+   {
+      g_window.secondProblem = "Frame " + std::to_string(b.frame) + " is not made like frame " + std::to_string(a.frame) +
+                               " (another size, or only one of them has an HD picture).";
+      return;
+   }
+   combine(a, b, g_window.combined);
 }
 
 uint32_t mostFrames() { return g_window.effect ? g_window.effect->maxSteps() : 0; }
@@ -476,6 +745,8 @@ uint32_t mostFrames() { return g_window.effect ? g_window.effect->maxSteps() : 0
 std::string framesChoices()
 {
    const uint32_t most = mostFrames();
+   if (g_window.toFrame && !g_window.secondProblem.empty())
+      return "0=None (select the second frame first)";
    if (most < 1)
       return "0=None (this transition can do nothing with this frame)";
    std::string choices;
@@ -490,11 +761,14 @@ std::string framesChoices()
 
 std::string framesHelp()
 {
+   if (g_window.toFrame && !g_window.secondProblem.empty())
+      return g_window.secondProblem;
    if (!g_window.effect)
       return std::string();
    if (mostFrames() < 1)
       return "This transition can do nothing with this frame (" + std::string(g_window.effect->limitReason()) +
-             "). For a fade this means the picture is already all black, or all white.";
+             "). For a fade this means the picture is already all black, or all white" +
+             (g_window.toFrame ? ", or the two frames hardly differ." : ".");
    return "Up to " + std::to_string(mostFrames()) + " different frames are possible from this frame (" +
           g_window.effect->limitReason() + ").";
 }
@@ -513,6 +787,12 @@ std::string sourceNote()
 {
    if (!g_window.sourceProblem.empty())
       return g_window.sourceProblem;
+   if (g_window.toFrame)
+      return g_window.secondProblem.empty()
+                ? "From frame " + std::to_string(g_window.source.frame) + " to frame " +
+                     std::to_string(g_window.second.frame) +
+                     ". The frame you clicked last is the start, the other selected frame the end."
+                : "Starting from frame " + std::to_string(g_window.source.frame) + ". " + g_window.secondProblem;
    return "Starting from frame " + std::to_string(g_window.source.frame) +
           ". Click another frame in the frame list to start from that one.";
 }
@@ -526,12 +806,66 @@ struct PreviewPictures
    std::vector<ColorizingDMDFormImage> images;
 };
 
+// The picture as the preview shows it: where the frame has dynamic zones, the pixels of a zone are
+// drawn in the color their dynamic set gives their shade (at run time the editor's colorized
+// picture has nothing there, so a fully dynamic frame would be black). Only the preview does
+// this; the new frames keep their zones.
+Plane staticPlane(const Source& source, const Plane& plane, const std::vector<uint8_t>& zones, uint32_t zonesWidth,
+                  uint32_t zonesHeight, const std::vector<uint16_t>& colors)
+{
+   Plane out = plane;
+   const uint32_t count = source.colorCount;
+   if (zones.empty() || colors.empty() || count == 0 || zonesWidth == 0 || zonesHeight == 0 || plane.width == 0 ||
+       plane.height == 0 || source.originalWidth == 0 || source.originalHeight == 0)
+      return out;
+   for (uint32_t y = 0; y < plane.height; ++y)
+      for (uint32_t x = 0; x < plane.width; ++x)
+      {
+         const size_t zoneIndex = static_cast<size_t>(static_cast<uint64_t>(y) * zonesHeight / plane.height) * zonesWidth +
+                                  static_cast<uint64_t>(x) * zonesWidth / plane.width;
+         const size_t shadeIndex = static_cast<size_t>(static_cast<uint64_t>(y) * source.originalHeight / plane.height) *
+                                      source.originalWidth +
+                                   static_cast<uint64_t>(x) * source.originalWidth / plane.width;
+         if (zoneIndex >= zones.size() || shadeIndex >= source.original.size())
+            continue;
+         const uint32_t set = zones[zoneIndex];
+         const uint32_t shade = source.original[shadeIndex];
+         if (set >= CDMDPI_DYNAMIC_SETS || shade >= count || static_cast<size_t>(set) * count + shade >= colors.size())
+            continue;
+         out.pixels[static_cast<size_t>(y) * plane.width + x] = colors[static_cast<size_t>(set) * count + shade];
+      }
+   return out;
+}
+
 PreviewPictures makePreview(uint32_t steps)
 {
    PreviewPictures out;
    if (!g_window.effect || steps < 1 || steps > mostFrames() || g_window.source.planes.empty())
       return out;
-   const Plane& plane = g_window.source.planes.front();
+   const Source& first = g_window.source;
+   const Combined& combined = g_window.combined;
+   const bool both = g_window.toFrame && combined.hasZones;
+   // The second frame's sets as the new frames number them: its colors for the sets it brought along.
+   std::vector<uint16_t> colors2 = first.dynamicColors;
+   if (g_window.toFrame)
+   {
+      if (colors2.empty())
+         colors2.assign(static_cast<size_t>(CDMDPI_DYNAMIC_SETS) * first.colorCount, 0);
+      for (const auto& entry : combined.sets)
+         if (entry.second.size() == first.colorCount &&
+             (static_cast<size_t>(entry.first) + 1) * first.colorCount <= colors2.size())
+            std::copy(entry.second.begin(), entry.second.end(),
+                      colors2.begin() + static_cast<size_t>(entry.first) * first.colorCount);
+   }
+   const Plane plane = staticPlane(first, first.planes.front(), both ? combined.zones1 : first.zones,
+                                   both ? combined.zonesWidth : first.zonesWidth,
+                                   both ? combined.zonesHeight : first.zonesHeight, first.dynamicColors);
+   Plane secondPlane;
+   if (g_window.toFrame)
+      secondPlane = staticPlane(g_window.second, g_window.second.planes.front(),
+                                both ? combined.zones2 : g_window.second.zones,
+                                both ? combined.zonesWidth : g_window.second.zonesWidth,
+                                both ? combined.zonesHeight : g_window.second.zonesHeight, colors2);
    const transitions::Effect& effect = *g_window.effect;
    const uint16_t fillColor = g_window.toWhite ? static_cast<uint16_t>(0xFFFF) : static_cast<uint16_t>(0);
    const std::vector<uint32_t> shown = preview::previewSteps(steps);
@@ -540,9 +874,8 @@ PreviewPictures makePreview(uint32_t steps)
    for (size_t i = 0; i < shown.size(); ++i)
    {
       const uint32_t step = shown[i];
-      preview::renderStep<uint16_t>(plane.pixels, out.pixels[i], plane.width, plane.height,
-                                    g_window.source.originalWidth, g_window.source.originalHeight, effect, step,
-                                    steps, fillColor, [&](uint16_t color) { return effect.color(color, step, steps); });
+      drawPlane(plane, g_window.toFrame ? &secondPlane : nullptr, fillColor, effect, step, steps,
+                out.pixels[i]);
       out.captions[i] = "Frame " + std::to_string(step) + " of " + std::to_string(steps);
    }
    // The images point into the pixels and captions, which are complete now.
@@ -621,6 +954,7 @@ void updateDuration()
 void reloadSource()
 {
    g_window.sourceProblem = loadSource(g_editor->GetCurrentFrame(), g_window.source);
+   loadSecond();
    ColorizingDMDProjectInfo info{};
    g_window.scenesPossible = g_editor->GetProjectInfo(&info) && info.hasProject &&
                              info.originalWidth == kSceneWidth && info.originalHeight == kSceneHeight;
@@ -665,8 +999,8 @@ void MSGPIAPI onFieldChanged(void* /*userData*/, const char* key)
    else if (field == kFieldTarget)
    {
       g_window.toWhite = formValue(kFieldTarget, "black") == "white";
-      makeEffect();
-      updateFrames();
+      g_window.toFrame = formValue(kFieldTarget, "black") == "frame";
+      refreshWindow(); // another frame needs the second frame read, and the note names it
    }
    else if (field == kFieldFrames)
    {
@@ -685,10 +1019,17 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
       return;
 
    // The project may have changed since the window last looked: start from what is there now.
+   g_window.toFrame = formValue(kFieldTarget, "black") == "frame";
+   g_window.toWhite = formValue(kFieldTarget, "black") == "white";
    reloadSource();
    if (!g_window.sourceProblem.empty())
    {
       message(kTitle, g_window.sourceProblem);
+      return;
+   }
+   if (g_window.toFrame && !g_window.secondProblem.empty())
+   {
+      message(kTitle, g_window.secondProblem);
       return;
    }
    g_window.transition = transitions::findTransition(formValue(kFieldTransition, "").c_str());
@@ -700,10 +1041,9 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    g_window.option = transitions::findOption(*g_window.transition, formValue(kFieldOption, "").c_str());
    if (g_window.option)
       saveSetting(optionKey(*g_window.transition).c_str(), g_window.option->id);
-   g_window.toWhite = formValue(kFieldTarget, "black") == "white";
    makeEffect();
 
-   const std::string what = describe(*g_window.transition, g_window.option, g_window.toWhite);
+   const std::string what = describe(*g_window.transition, g_window.option, targetName());
    if (mostFrames() < 1)
    {
       message(kTitle, what + " can do nothing with this frame (" + g_window.effect->limitReason() +
@@ -760,6 +1100,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
    if (!g_editor || g_window.open)
       return;
 
+   g_window.toFrame = setting(kFieldTarget, "black") == "frame";
    reloadSource();
    if (!g_window.sourceProblem.empty())
    {
@@ -811,8 +1152,9 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
        optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
       {"sep1", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO, g_window.toWhite ? "white" : "black",
-       "black=Black\nwhite=White", nullptr, 0, nullptr, 0},
+      {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO,
+       g_window.toFrame ? "frame" : (g_window.toWhite ? "white" : "black"),
+       "black=Black\nwhite=White\nframe=Another frame", nullptr, 0, nullptr, 0},
       {"sep2", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
