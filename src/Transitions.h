@@ -458,7 +458,7 @@ private:
 class Fade final : public Effect
 {
 public:
-   Fade(bool toWhite, const SourceInfo& source) : m_toWhite(toWhite), m_colorCount(std::max(2u, source.colorCount))
+   Fade(bool toWhite, const SourceInfo& source) : m_toWhite(toWhite)
    {
       if (source.toFrame)
       {
@@ -475,8 +475,6 @@ public:
       for (uint16_t c : source.colors)
          span = std::max(span, spanOf(c));
       m_colorSpan = span;
-      const uint32_t top = m_colorCount - 1u;
-      m_shadeSpan = toWhite ? top - std::min(top, source.darkestShade) : std::min(top, source.brightestShade);
 
       // The colors that change first, for the quick check below.
       m_colors = source.colors;
@@ -502,11 +500,6 @@ public:
       const uint32_t f = factor(m_colorSpan, step, steps);
       const uint32_t r = (c >> 11) & 31u, g = (c >> 5) & 63u, b = c & 31u;
       return static_cast<uint16_t>((channel(r, 31, f) << 11) | (channel(g, 63, f) << 5) | channel(b, 31, f));
-   }
-
-   uint8_t shade(uint8_t s, uint32_t step, uint32_t steps) const override
-   {
-      return static_cast<uint8_t>(channel(s, m_colorCount - 1u, factor(m_shadeSpan, step, steps)));
    }
 
 private:
@@ -567,9 +560,7 @@ private:
 
    bool m_toWhite;
    bool m_cross = false;
-   uint32_t m_colorCount;
    uint32_t m_colorSpan = 0;
-   uint32_t m_shadeSpan = 0;
    std::vector<uint16_t> m_colors;
    uint32_t m_maxSteps = 0;
 };

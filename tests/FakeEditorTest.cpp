@@ -2031,6 +2031,43 @@ void testPreviewShowsDynamicContent()
    closeForm(false);
 }
 
+// A fade changes the colors, not the original shades: a dynamic zone colors a pixel by its shade, so
+// fading the shades would step through the zone's colors. A cross-fade switches the shades over
+// with the zones.
+void testFadeKeepsTheOriginalShades()
+{
+   for (const char* target : {"black", "white"})
+   {
+      resetProject(128, 32, true);
+      openMenu();
+      change("transition", "fade");
+      change("target", target);
+      change("frames", "3");
+      change("placement", "end");
+      closeForm(true);
+      CHECK(g_frames.size() == 5);
+      for (size_t k = 2; k < g_frames.size(); ++k)
+      {
+         CHECK(g_frames[k].original == g_frames[0].original);
+         CHECK(g_frames[k].zones == g_frames[0].zones);
+         CHECK(g_frames[k].sd != g_frames[0].sd); // the picture does fade
+      }
+   }
+
+   resetProject(128, 32, true);
+   g_frames[1] = makeSecondFrame(true);
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "fade");
+   change("frames", "3");
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_frames.size() == 5);
+   for (size_t k = 0; k < 3 && g_frames.size() == 5; ++k)
+      CHECK(g_frames[2 + k].original == (k < 1 ? g_frames[0].original : g_frames[1].original)); // weight 1/4, then 1/2, 3/4
+}
+
 void testScene()
 {
    // The new frames become a scene that the starting frame starts; the plain frames go again.
@@ -2137,6 +2174,7 @@ int main()
    testScene();
    testAnotherFrame();
    testPreviewShowsDynamicContent();
+   testFadeKeepsTheOriginalShades();
    // Every transition through the window, on the sizes of real projects (single plane at the
    // ROM resolution for 192x64 and 256x64), without and with dynamic zones.
    const uint32_t sizes[][2] = {{128, 32}, {192, 64}, {256, 64}};

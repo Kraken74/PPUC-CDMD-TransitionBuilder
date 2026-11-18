@@ -120,7 +120,8 @@ and the window follows when you select other frames. The preview shows your two 
 - Slide, Wipe, Split, Blinds, Dissolve and Alternating Slide take pixels of the start frame away,
   and the other frame shows underneath, where they were. The other frame stays still.
 - Fade cross-fades: every pixel blends from the colors of the start frame to those of the other
-  frame. The most frames is how far the two frames' colors are apart.
+  frame. The most frames is how far the two frames' colors are apart. The original shades and the
+  dynamic zones change over from the start frame's to the other frame's at the halfway point.
 - The new frames lie between the two; the end frame itself is not copied.
 - **Dynamic zones:** where both frames use the same dynamic set for different colors, the
   other frame's zones of that set are moved to a dynamic set nobody uses, with that set's colors, so
@@ -140,8 +141,11 @@ and the window follows when you select other frames. The preview shows your two 
   plugin API cannot change a frame's background mask. The plugin tells you when the frame has one.
 - Pixels a transition has taken away are black (or white) in the frame's original shades and in the pictures, and they are taken
   out of the dynamic zones. In moving transitions the dynamic zones move with the picture.
-- **Fade:** the colors of the picture and the frame's dynamic colors fade. Color rotations of the
-  new frames are removed (they would keep turning the colors at full brightness).
+- **Fade:** the colors of the picture and the frame's dynamic colors fade. The original shades
+  stay as they are (a dynamic zone colors a pixel by its shade, so fading them would step through the
+  zone's colors as well as fading those); the new frames of a fade therefore have the same original
+  frame, which is fine for frames you put in a scene. Color rotations of the new frames are removed
+  (they would keep turning the colors at full brightness).
 
 ## Adding another transition
 

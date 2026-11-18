@@ -73,14 +73,8 @@ inline uint16_t mixColor(uint16_t a, uint16_t b, uint32_t weight)
    return static_cast<uint16_t>((r << 11) | (g << 5) | bl);
 }
 
-// Blends two shades (weight of b: 0 .. 65536).
-inline uint8_t mixShade(uint8_t a, uint8_t b, uint32_t weight)
-{
-   return static_cast<uint8_t>(a + static_cast<int>(((static_cast<int64_t>(b) - a) * weight + 32768) >> 16));
-}
-
-// Zones cannot blend: a pixel is in the zone of the starting frame until the halfway point, then
-// in that of the other frame.
+// Zones and shades cannot blend: a pixel keeps the zone and the shade of the starting frame until
+// the halfway point, then has those of the other frame.
 inline uint8_t mixZone(uint8_t a, uint8_t b, uint32_t weight) { return weight < 32768 ? a : b; }
 
 // The pictures the preview shows.

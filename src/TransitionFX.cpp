@@ -523,10 +523,12 @@ std::string createTransition(const Request& request, Result& result)
       const std::string which = "frame " + std::to_string(step) + " of " + std::to_string(steps);
 
       // The original: the pixels taken away get the shade of black (0) or white (the brightest),
-      // or the pixel of the other frame; a cross-fade blends the shades.
+      // or the pixel of the other frame. A fade does not change the shades (a dynamic zone colors a pixel
+      // by its shade, so fading them would step through the zone's colors, besides fading those); a
+      // cross-fade switches from one frame's shades to the other's at the halfway point, with the zones.
       if (toFrame && effect.crossFades())
          preview::renderCross<uint8_t>(source.original, second.original, stepOriginal, effect, step, steps,
-                                       preview::mixShade);
+                                       preview::mixZone);
       else
          preview::renderStep<uint8_t>(source.original, stepOriginal, ow, oh, ow, oh, effect, step, steps, fillShade,
                                       [&](uint8_t shade) { return effect.shade(shade, step, steps); },
