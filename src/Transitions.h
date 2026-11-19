@@ -992,57 +992,49 @@ inline const Option kWipeOptions[] = {
 
 inline const Transition kTransitions[] = {
    {"alternating_slide", "Alternating Slide",
-    "Lines slide off in turns. Horizontal: the 1st, 3rd, 5th ... row slide left and the 2nd, "
-    "4th, 6th ... row slide right. Vertical: the 1st, 3rd, 5th ... column go up and the 2nd, "
-    "4th, 6th ... column go down. A thin strip of each line is left at the end.",
+    "Horizontal: even rows slide left and odd rows slide right (starting at row 0)\n"
+    "Vertical: even columns slide up and odd columns slide down (starting at column 0)",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide, true},
    {"blinds", "Blinds",
-    "Bars appear at regular intervals and grow wider until only thin slits of the picture are "
-    "left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by side.",
+    "Bars appear at regular intervals and grow wider. Horizontal: horizontal bars, stacked. "
+    "Vertical: vertical bars, side by side.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
    {"checkerboard", "Checkerboard",
     "The picture is cut into squares that disappear one by one: first the squares of one color "
-    "of a checkerboard, in a sweep from the top left corner, then the others. One square is "
-    "left at the end.",
+    "of a checkerboard, in a sweep from the top left corner, then the others.",
     "Square Size", kSquareOptions, TB_COUNT(kSquareOptions), &makeCheckerboard},
    {"dissolve", "Dissolve",
     "The picture dissolves pixel by pixel. Orderly: pixels disappear in a regular pattern. "
     "Random: pixels disappear at random.",
     "Dissolve Type", kDissolveOptions, TB_COUNT(kDissolveOptions), &makeDissolve},
    {"fade", "Fade",
-    "The picture gets darker (to black) or brighter (to white) at each step. The last frame is "
-    "almost black or almost white, but not quite. Color rotations of the new frames are "
-    "removed, because they would not fade.",
+    "The first frame gradually fades to black, white or the second frame.",
     nullptr, nullptr, 0, &makeFade},
    {"melt", "Melt",
     "The picture melts down off the screen: every column slides down at its own speed. Smooth: "
-    "the speeds follow a wave. Dripping: the speeds look random, like paint dripping. A thin "
-    "sliver of the slowest column is left at the end.",
+    "the speeds follow a wave. Dripping: the speeds look random, like paint dripping.",
     "Style", kMeltOptions, TB_COUNT(kMeltOptions), &makeMelt, true},
    {"pixelate", "Pixelate",
-    "The picture turns into bigger and bigger blocks. To another frame: the first frame turns "
-    "into blocks, then the other frame comes out of the blocks and sharpens.",
+    "The first frame turns into bigger and bigger blocks, slowly at first and then faster. To "
+    "another frame: the other frame then comes out of the blocks and sharpens.",
     nullptr, nullptr, 0, &makePixelate},
    {"slide", "Slide",
-    "The whole picture slides off the screen in the direction you choose. A thin strip of it "
-    "is left at the end.",
+    "The whole picture slides off the screen in the direction you choose.",
     "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide, true},
    {"split", "Split",
-    "The picture is cut in the middle and the two halves slide apart, until a thin strip of "
-    "each is left at the edges. Horizontal: cut across, the top half slides up and the bottom "
-    "half down. Vertical: cut down, the left half slides left and the right half right.",
+    "The picture is cut in the middle and the two halves slide apart. Horizontal: cut across, "
+    "the top half slides up and the bottom half down. Vertical: cut down, the left half slides "
+    "left and the right half right.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
    {"wave", "Wave",
     "The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows "
     "slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves "
-    "over the width. The crests go twice as fast as the troughs; thin slivers of the troughs are "
-    "left at the end.",
+    "over the width. The crests go twice as fast as the troughs.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeWave, true},
    {"wipe", "Wipe",
     "A bar wipes over the picture in the direction you choose (Left: it comes in from the right "
     "edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture "
-    "closes in from the outside edges. Spiral: a spiral winds in from the top left corner. A "
-    "little of the picture is left at the end.",
+    "closes in from the outside edges. Spiral: a spiral winds in from the top left corner.",
     "Wipe Type", kWipeOptions, TB_COUNT(kWipeOptions), &makeWipe},
    {"zoom", "Zoom",
     "Zoom In: the picture grows toward you, a smaller and smaller part of the middle fills the "

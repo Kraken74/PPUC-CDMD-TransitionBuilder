@@ -29,6 +29,7 @@
 #include "ColorizingDMDPlugin.h"
 #include "Preview.h"
 #include "Transitions.h"
+#include "Version.h"
 #include "plugins/MsgPlugin.h"
 
 namespace {
@@ -41,6 +42,8 @@ unsigned int g_selectionChangedId = 0;
 unsigned int g_projectChangedId = 0;
 
 constexpr const char* kTitle = "TransitionFX";
+// The window's title: the name and the version (src/Version.h).
+const std::string kWindowTitle = std::string("TransitionFX v") + kVersion;
 constexpr const char* kUndoName = "TransitionFX";
 
 // The fields of the window. Their values are kept as settings when the author clicks Apply, so
@@ -660,8 +663,9 @@ std::string createTransition(const Request& request, Result& result)
              "the frame order or on this frame: the status bar names who, for a few seconds. Merge the partners' changes first, or ask them. "
              "Nothing was changed.";
 
+   // The current frame and the selection stay as they are (no ShowFrames): the editor's Undo
+   // takes the new frames back, and the author is where they were before.
    result.shown = created;
-   g_editor->ShowFrames(result.shown.front(), result.shown.data(), static_cast<uint32_t>(result.shown.size()));
    return std::string();
 }
 
@@ -922,6 +926,15 @@ void updateFrames()
    updatePreview();
 }
 
+// The description of a transition: the help under the transition choice, so that every
+// transition has one, with or without options.
+void showDescription(const transitions::Transition& transition)
+{
+   ColorizingDMDFormFieldUpdate change = changeOf(CDMDPI_FORM_SET_HELP);
+   change.help = transition.description;
+   update(kFieldTransition, change);
+}
+
 // The option field for the transition the window shows: its own label and list, the option it
 // was used with last; hidden for a transition without options.
 void updateOption()
@@ -934,20 +947,19 @@ void updateOption()
       change.visible = 0;
       update(kFieldOption, change);
       update(kFieldGap, change);
+      showDescription(transition);
       return;
    }
    g_window.option = transitions::findOption(transition, setting(optionKey(transition).c_str(), "").c_str());
    const std::string choices = optionChoices(transition);
-   const std::string help = transition.description;
    ColorizingDMDFormFieldUpdate change =
-      changeOf(CDMDPI_FORM_SET_VISIBLE | CDMDPI_FORM_SET_LABEL | CDMDPI_FORM_SET_CHOICES | CDMDPI_FORM_SET_VALUE |
-               CDMDPI_FORM_SET_HELP);
+      changeOf(CDMDPI_FORM_SET_VISIBLE | CDMDPI_FORM_SET_LABEL | CDMDPI_FORM_SET_CHOICES | CDMDPI_FORM_SET_VALUE);
    change.visible = 1;
    change.label = transition.optionLabel;
    change.choices = choices.c_str();
    change.value = g_window.option->id;
-   change.help = help.c_str();
    update(kFieldOption, change);
+   showDescription(transition);
    ColorizingDMDFormFieldUpdate gap = changeOf(CDMDPI_FORM_SET_VISIBLE);
    gap.visible = 1;
    update(kFieldGap, gap);
@@ -1158,7 +1170,6 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
    const std::string note = sourceNote();
    const std::string options = transition.optionCount ? optionChoices(transition) : "-";
    const std::string optionValue = g_window.option ? g_window.option->id : "-";
-   const std::string optionHelp = transition.description;
    const std::string frames = framesChoices();
    g_window.framesWanted = setting(kFieldFrames, "10");
    const std::string framesStart = framesValue(g_window.framesWanted);
@@ -1174,12 +1185,12 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
 
    const ColorizingDMDFormField fields[] = {
       {kFieldSource, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTransition, "Transition", CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(), nullptr, 0,
-       nullptr, 0},
+      {kFieldTransition, "Transition", CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(),
+       transition.description, 0, nullptr, 0},
       {kFieldGap, kGap, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
       {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_RADIO,
-       optionValue.c_str(), options.c_str(), optionHelp.c_str(), transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
+       optionValue.c_str(), options.c_str(), nullptr, transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
       {"sep1", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO,
@@ -1208,7 +1219,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
        pictures.images.empty() ? CDMDPI_FORM_HIDDEN : 0u, pictures.images.data(),
        static_cast<uint32_t>(pictures.images.size())},
    };
-   if (!g_editor->ShowLiveForm(g_endpoint, kTitle, "Apply", nullptr, 0, fields,
+   if (!g_editor->ShowLiveForm(g_endpoint, kWindowTitle.c_str(), "Apply", nullptr, 0, fields,
                                static_cast<uint32_t>(sizeof(fields) / sizeof(fields[0])), onFieldChanged,
                                onWindowClosed, nullptr))
    {

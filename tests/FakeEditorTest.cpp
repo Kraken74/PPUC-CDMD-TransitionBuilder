@@ -19,6 +19,7 @@
 #include "ColorizingDMDPlugin.h"
 #include "Preview.h"
 #include "Transitions.h"
+#include "Version.h"
 #include "plugins/MsgPlugin.h"
 
 MSGPI_EXPORT void MSGPIAPI TransitionFXPluginLoad(const uint32_t, const MsgPluginAPI*);
@@ -85,6 +86,7 @@ std::vector<std::string> g_messages;
 std::vector<std::string> g_status;
 int g_endEditApplied = 0;
 std::vector<uint32_t> g_shown;
+int g_showCalls = 0; // the plugin leaves the current frame and the selection alone, so Undo returns to them
 cdmdpi_action_callback g_menuCallback = nullptr;
 
 // The live form the plugin opened last.
@@ -225,6 +227,7 @@ uint32_t MSGPIAPI fGetSelectedFrames(uint32_t* frames, uint32_t cap)
 
 int MSGPIAPI fShowFrames(uint32_t, const uint32_t* frames, uint32_t count)
 {
+   ++g_showCalls;
    g_shown.assign(frames, frames + count);
    return 1;
 }
@@ -698,6 +701,7 @@ void resetProject(uint32_t w, uint32_t h, bool withZones)
    g_messages.clear();
    g_status.clear();
    g_shown.clear();
+   g_showCalls = 0;
    g_endEditApplied = 0;
    g_addFrameLimit = -1;
    g_refuseMove = false;
@@ -1277,11 +1281,18 @@ size_t countShade(const std::vector<uint8_t>& v, uint8_t shade)
    return static_cast<size_t>(std::count(v.begin(), v.end(), shade));
 }
 
+// The status line names the new frames ("frames 3 to 6", or "(frames 3 to 6)" for a scene).
+bool statusFrames(uint32_t first, uint32_t last)
+{
+   return !g_status.empty() &&
+          g_status.back().find("frames " + std::to_string(first) + " to " + std::to_string(last)) != std::string::npos;
+}
+
 void checkNewFrames(size_t added, bool zones)
 {
    CHECK(g_frames.size() == 2 + added);
    CHECK(g_endEditApplied == 1);
-   CHECK(g_shown.size() == added);
+   CHECK(g_showCalls == 0);
    for (size_t i = 2; i < g_frames.size(); ++i)
    {
       CHECK(g_frames[i].comparisonMask == CDMDPI_NONE);
@@ -1405,7 +1416,7 @@ void testTheWindow()
       const std::vector<std::string> want = {"orderly", "random"};
       CHECK(choiceValues(*o) == want);
       CHECK(o->label == "Dissolve Type" && o->value == "orderly");
-      CHECK(o->help.find("Random") != std::string::npos);
+      CHECK(o->help.empty() && fieldOf("transition")->help.find("Random") != std::string::npos);
    }
    // What the transition goes to: black or white, for every transition.
    const Form::Field* tg = fieldOf("target");
@@ -1617,7 +1628,7 @@ void testTheWindowFollowsTheCurrentFrame()
    fireEvent(CDMDPI_EVT_ON_PROJECT_CHANGED);
    closeForm(true);
    CHECK(g_frames.size() == 7 && g_messages.empty());
-   CHECK((g_shown == std::vector<uint32_t>{3, 4, 5, 6}));
+   CHECK(g_showCalls == 0 && statusFrames(3, 6));
    CHECK(g_frames[3].original != g_frames[0].original);
    // Events after the window closed change nothing.
    const size_t updates = static_cast<size_t>(g_fieldUpdates);
@@ -1724,7 +1735,7 @@ void testPlacementAfterTheSource()
          CHECK(litPixels(g_frames[i]) < litPixels(g_frames[i - 1])); // in the order of the steps
    }
    CHECK(litPixels(g_frames[1]) < litPixels(g_frames[0]));
-   CHECK((g_shown == std::vector<uint32_t>{1, 2, 3, 4}));
+   CHECK(g_showCalls == 0 && statusFrames(1, 4));
    CHECK(g_status.size() == 1 && g_status[0].find("as frames 1 to 4") != std::string::npos);
 
    // Source in the middle.
@@ -1735,7 +1746,7 @@ void testPlacementAfterTheSource()
    runFlow("slide", "left", 3, "after");
    CHECK(g_frames.size() == 6);
    CHECK(g_frames[5].background == 9);
-   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+   CHECK(g_showCalls == 0 && statusFrames(2, 4));
    CHECK(g_frames[2].original != g_frames[1].original);
 
    // Source last: the new frames already are behind it, nothing has to move.
@@ -1743,7 +1754,7 @@ void testPlacementAfterTheSource()
    g_current = 1;
    runFlow("wipe", "up", 3, "after");
    CHECK(g_frames.size() == 5 && g_endEditApplied == 1);
-   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+   CHECK(g_showCalls == 0 && statusFrames(2, 4));
 
    // The default of the window is "after".
    resetProject(128, 32, false);
@@ -1763,7 +1774,7 @@ void testPlacementAtTheEnd()
    runFlow("blinds", "vertical", 3, "end");
    CHECK(g_frames.size() == 5);
    CHECK(g_frames[1].background == 7);
-   CHECK((g_shown == std::vector<uint32_t>{2, 3, 4}));
+   CHECK(g_showCalls == 0 && statusFrames(2, 4));
    CHECK(g_status.size() == 1 && g_status[0].find("as frames 2 to 4") != std::string::npos);
 }
 
@@ -2332,6 +2343,31 @@ void testSecondMoves()
       }
 }
 
+void testVersionAndDescriptions()
+{
+   resetProject(128, 32, false);
+   openMenu();
+   CHECK(g_form.title == std::string("TransitionFX v") + kVersion);
+   CHECK(std::string(kVersion) == "1.00");
+   // Every transition has a description, shown under the transition choice, with or without options.
+   for (const auto& t : transitions::kTransitions)
+   {
+      CHECK(t.description && std::string(t.description).size() > 10);
+      change("transition", t.id);
+      const Form::Field* f = fieldOf("transition");
+      CHECK(f && f->help == t.description);
+      // None names what is left in the last frame.
+      const std::string d = t.description;
+      CHECK(d.find("left at the end") == std::string::npos && d.find("thin ") == std::string::npos);
+   }
+   CHECK(std::string(transitions::findTransition("alternating_slide")->description) ==
+         "Horizontal: even rows slide left and odd rows slide right (starting at row 0)\n"
+         "Vertical: even columns slide up and odd columns slide down (starting at column 0)");
+   CHECK(std::string(transitions::findTransition("fade")->description) ==
+         "The first frame gradually fades to black, white or the second frame.");
+   closeForm(false);
+}
+
 void testSecondMovesWindow()
 {
    // The "Second frame" field: only for another frame and for the transitions that can do it.
@@ -2504,7 +2540,7 @@ void testScene()
    CHECK(g_frames[0].inScene == CDMDPI_NONE);
    for (size_t i = 1; i <= 5; ++i)
       CHECK(g_frames[i].inScene == 50000);
-   CHECK((g_shown == std::vector<uint32_t>{1, 2, 3, 4, 5}));
+   CHECK(g_showCalls == 0 && statusFrames(1, 5));
    CHECK(litPixels(g_frames[5]) < litPixels(g_frames[1]));
    CHECK(g_status.size() == 1 && g_status[0].find("as scene 50000") != std::string::npos);
    CHECK(g_settings["duration"] == "40");
@@ -2590,6 +2626,7 @@ int main()
    testMelt();
    testSecondMoves();
    testSecondMovesWindow();
+   testVersionAndDescriptions();
    testCheckerboard();
    testGoingThroughBothFrames();
    // Every transition through the window, on the sizes of real projects (single plane at the
