@@ -8,16 +8,16 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 
 | Transition | Options | What it does |
 | --- | --- | --- |
-| **Alternating Slide** | Horizontal, Vertical | Horizontal: the 1st, 3rd, 5th ... row slide left, the 2nd, 4th ... row slide right. Vertical: the 1st, 3rd ... column go up, the 2nd, 4th ... column go down. |
-| **Blinds** | Horizontal, Vertical | Bars at regular intervals grow wider until only thin slits of the picture are left. |
-| **Checkerboard** | 2 x 2, 4 x 4, 8 x 8, 16 x 16 | The picture is cut into squares of the size you choose. They disappear one by one: first the squares of one color of a checkerboard, sweeping from the top left corner, then the others. One square is left at the end. |
+| **Alternating Slide** | Horizontal, Vertical | Horizontal: even rows slide left and odd rows slide right (starting at row 0). Vertical: even columns slide up and odd columns slide down (starting at column 0). |
+| **Blinds** | Horizontal, Vertical | Bars at regular intervals grow wider. |
+| **Checkerboard** | 2 x 2, 4 x 4, 8 x 8, 16 x 16 | The picture is cut into squares of the size you choose. They disappear one by one: first the squares of one color of a checkerboard, sweeping from the top left corner, then the others. |
 | **Dissolve** | Orderly, Random | Pixels disappear in a regular pattern, or at random. |
 | **Fade** | | The picture gets darker (to black) or brighter (to white) with every frame. |
-| **Melt** | Smooth, Dripping | The picture melts down off the screen: every column slides down at its own speed. Smooth: the speeds follow a wave (the same as Wave, Vertical). Dripping: the speeds look random, in streaks, like paint dripping. A thin sliver of the slowest column is left at the end. |
+| **Melt** | Smooth, Dripping | The picture melts down off the screen: every column slides down at its own speed. Smooth: the speeds follow a wave (the same as Wave, Vertical). Dripping: the speeds look random, in streaks, like paint dripping. |
 | **Pixelate** | | The picture turns into bigger and bigger blocks (each shows the pixel at its middle), up to blocks as big as the frame is tall. The blocks grow slowly at first and faster later. |
 | **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
-| **Wave** | Horizontal, Vertical | The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves over the width. The crests go twice as fast as the troughs, so the last frames show only thin slivers of the troughs. |
+| **Wave** | Horizontal, Vertical | The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves over the width. The crests go twice as fast as the troughs. |
 | **Wipe** | Up, Down, Left, Right, Centre-Out, Edge-In, Spiral | A bar wipes over the picture in the direction you choose (Left: it comes in from the right edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture closes in from the outside edges. Spiral: a spiral winds in from the top left corner. |
 | **Zoom** | In, Out | In: the picture grows toward you, a smaller and smaller part of the middle fills the frame (down to an eighth of the width). Out: the picture shrinks toward the middle (down to a sixteenth of the width). |
 
@@ -229,3 +229,9 @@ Wipe Centre-Out
 Wipe Spiral
 
 <img width="640" height="160" alt="Wipe Spiral" src="https://github.com/user-attachments/assets/66c894c3-2344-43f0-83c3-ad7f8366417b" />
+
+## Version
+
+The window's title shows the version (`TransitionFX v1.00`). It is `kVersion` in `src/Version.h`;
+raise it by 0.01 with every update merged into the main branch, and keep `version` in `plugin.cfg`
+the same.
