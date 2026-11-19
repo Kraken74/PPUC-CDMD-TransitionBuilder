@@ -49,6 +49,7 @@ constexpr const char* kFieldSource = "source"; // the note that names the starti
 constexpr const char* kFieldTransition = "transition";
 constexpr const char* kFieldOption = "option";
 constexpr const char* kFieldTarget = "target"; // "black" or "white": what the transition goes to
+constexpr const char* kFieldMotion = "second_motion"; // "still" or "moves": what the other frame does
 constexpr const char* kFieldFrames = "frames";
 // A note that draws a thin line between the groups of fields (a note starting with a tag is HTML).
 constexpr const char* kSeparator = "<hr>";
@@ -123,6 +124,9 @@ struct Window
    Source second;
    std::string secondProblem; // why there is no second frame; empty when there is one
    Combined combined;
+   // The other frame comes in with the effect, in its pattern, instead of staying in place (only
+   // for the transitions that can do that).
+   bool secondMoves = false;
    // The number of frames the author asked for: the list shows it whenever the transition can
    // make that many, and the most it can make otherwise.
    std::string framesWanted;
@@ -196,7 +200,10 @@ std::string describe(const transitions::Transition& transition, const transition
 std::string targetName()
 {
    if (g_window.toFrame)
-      return "frame " + std::to_string(g_window.second.frame);
+      return "frame " + std::to_string(g_window.second.frame) +
+             (g_window.secondMoves && g_window.transition && g_window.transition->canMoveSecond
+                 ? ", moving in with it"
+                 : "");
    return g_window.toWhite ? "White" : "Black";
 }
 
@@ -699,9 +706,12 @@ void makeEffect()
    g_window.effect.reset();
    const bool ready = g_window.sourceProblem.empty() && (!g_window.toFrame || g_window.secondProblem.empty());
    if (ready && g_window.transition)
-      g_window.effect = g_window.transition->make(
-         g_window.option ? g_window.option->id : "",
-         sourceInfoOf(g_window.source, g_window.toWhite, g_window.toFrame ? &g_window.second : nullptr));
+   {
+      transitions::SourceInfo info =
+         sourceInfoOf(g_window.source, g_window.toWhite, g_window.toFrame ? &g_window.second : nullptr);
+      info.secondMoves = g_window.secondMoves && g_window.transition->canMoveSecond;
+      g_window.effect = g_window.transition->make(g_window.option ? g_window.option->id : "", info);
+   }
 }
 
 // Reads the second frame (the other selected frame) and fits it under the first, when the window
@@ -943,6 +953,15 @@ void updateOption()
    update(kFieldGap, gap);
 }
 
+// The "Second frame" field: shown for a transition to another frame, by the transitions that can
+// bring that frame in with the effect.
+void updateMotion()
+{
+   ColorizingDMDFormFieldUpdate change = changeOf(CDMDPI_FORM_SET_VISIBLE);
+   change.visible = g_window.toFrame && g_window.transition && g_window.transition->canMoveSecond ? 1 : 0;
+   update(kFieldMotion, change);
+}
+
 void updateDuration()
 {
    ColorizingDMDFormFieldUpdate change = changeOf(CDMDPI_FORM_SET_VISIBLE);
@@ -985,6 +1004,7 @@ void MSGPIAPI onFieldChanged(void* /*userData*/, const char* key)
          return;
       g_window.transition = transition;
       updateOption();
+      updateMotion();
       makeEffect();
       updateFrames();
    }
@@ -996,10 +1016,18 @@ void MSGPIAPI onFieldChanged(void* /*userData*/, const char* key)
       makeEffect();
       updateFrames();
    }
+   else if (field == kFieldMotion)
+   {
+      g_window.secondMoves = formValue(kFieldMotion, "still") == "moves";
+      saveSetting(kFieldMotion, g_window.secondMoves ? "moves" : "still");
+      makeEffect();
+      updateFrames();
+   }
    else if (field == kFieldTarget)
    {
       g_window.toWhite = formValue(kFieldTarget, "black") == "white";
       g_window.toFrame = formValue(kFieldTarget, "black") == "frame";
+      updateMotion();
       refreshWindow(); // another frame needs the second frame read, and the note names it
    }
    else if (field == kFieldFrames)
@@ -1021,6 +1049,7 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    // The project may have changed since the window last looked: start from what is there now.
    g_window.toFrame = formValue(kFieldTarget, "black") == "frame";
    g_window.toWhite = formValue(kFieldTarget, "black") == "white";
+   g_window.secondMoves = formValue(kFieldMotion, "still") == "moves";
    reloadSource();
    if (!g_window.sourceProblem.empty())
    {
@@ -1116,6 +1145,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       transition.optionCount ? transitions::findOption(transition, setting(optionKey(transition).c_str(), "").c_str())
                              : nullptr;
    g_window.toWhite = setting(kFieldTarget, "black") == "white";
+   g_window.secondMoves = setting(kFieldMotion, "still") == "moves";
    makeEffect();
 
    std::string transitionChoices;
@@ -1155,6 +1185,12 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO,
        g_window.toFrame ? "frame" : (g_window.toWhite ? "white" : "black"),
        "black=Black\nwhite=White\nframe=Another frame", nullptr, 0, nullptr, 0},
+      {kFieldMotion, "Second frame", CDMDPI_FIELD_RADIO, g_window.secondMoves ? "moves" : "still",
+       "still=Stays in place, revealed\nmoves=Moves in with the effect",
+       "Stays in place: the second frame is not moved, the effect uncovers it. Moves in with the effect: the "
+       "second frame follows the first one in, in the same pattern (a slide pushes it in, a melt lets it "
+       "drip in from the top ...).",
+       g_window.toFrame && transition.canMoveSecond ? 0u : CDMDPI_FORM_HIDDEN, nullptr, 0},
       {"sep2", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
       {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
