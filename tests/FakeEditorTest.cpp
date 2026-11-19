@@ -2075,10 +2075,12 @@ void testFadeKeepsTheOriginalShades()
 
 // ---- Pixelate, Zoom, Wave, Checkerboard ------------------------------------------------------
 
-std::unique_ptr<transitions::Effect> makeNamed(const char* id, const char* option, uint32_t w, uint32_t h, bool toFrame = false)
+std::unique_ptr<transitions::Effect> makeNamed(const char* id, const char* option, uint32_t w, uint32_t h, bool toFrame = false,
+                                               bool secondMoves = false)
 {
    transitions::SourceInfo info = makeInfo(w, h);
    info.toFrame = toFrame;
+   info.secondMoves = secondMoves;
    return transitions::findTransition(id)->make(option, info);
 }
 
@@ -2097,6 +2099,19 @@ void testPixelate()
    const transitions::Rule first = e->rule(5, 7, 1, 31);
    CHECK(first.x == 5 && first.y == 7); // 2 x 2 blocks: the pixel at the middle (odd) of the block
    CHECK(e->rule(4, 6, 1, 31).x == 5 && e->rule(4, 6, 1, 31).y == 7);
+
+   // It eases in: with 8 frames the first ones have small blocks, the growth speeds up, the last one is the largest.
+   uint32_t previous = 0;
+   for (uint32_t step = 1; step <= 8; ++step)
+   {
+      uint32_t size = 0; // the width of the first block
+      for (uint32_t x = 0; x < 128; ++x)
+         size += e->rule(x, 0, step, 8).x == e->rule(0, 0, step, 8).x;
+      CHECK(size > previous);                              // always bigger than the frame before
+      CHECK(step < 8 ? size <= 2u * (step * step * 31u / 64u + 2u) : size == 32);
+      previous = size;
+   }
+   CHECK(e->rule(0, 0, 1, 8).x <= 2 && e->rule(0, 0, 4, 8).x <= 8); // not big by the half way
 
    // To another frame: twice the levels, the blocks grow on the first frame, then shrink on the other.
    auto both = makeNamed("pixelate", "", 128, 32, true);
@@ -2159,21 +2174,216 @@ void testWave()
 
    // Horizontal: the rows slide sideways (one wave over the 32 rows), what is uncovered is taken away.
    auto h = makeNamed("wave", "horizontal", 128, 32);
-   CHECK(h->maxSteps() == 128);
-   const transitions::Rule crest = h->rule(50, 8, 20, 128); // row 8 is a crest: moved right by 20
-   CHECK(crest.visible && crest.x == 30 && crest.y == 8);
-   CHECK(!h->rule(10, 8, 20, 128).visible);                 // uncovered on the left
-   const transitions::Rule trough = h->rule(50, 24, 20, 128); // row 24: moved left by 20
-   CHECK(trough.visible && trough.x == 70 && trough.y == 24);
-   const transitions::Rule still = h->rule(50, 16, 20, 128); // row 16 does not move
-   CHECK(still.visible && still.x == 50 && still.y == 16);
+   CHECK(h->maxSteps() == 127);
+   // Every row moves right by the pull (20) at least; a crest row (8) by half of it more, a trough row (24) not.
+   const transitions::Rule crest = h->rule(50, 8, 20, 127);
+   CHECK(crest.visible && crest.x == 10 && crest.y == 8); // 50 - 20 - 10 - 10
+   CHECK(!h->rule(39, 8, 20, 127).visible);                // uncovered on the left
+   const transitions::Rule trough = h->rule(50, 24, 20, 127);
+   CHECK(trough.visible && trough.x == 30 && trough.y == 24);
+   const transitions::Rule still = h->rule(50, 16, 20, 127); // row 16: on the wave's middle
+   CHECK(still.visible && still.x == 20 && still.y == 16);
+   // At the end only a sliver of the trough rows is left: one column, none of the crest rows.
+   long left = 0;
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+         left += h->rule(x, y, 127, 127).visible;
+   CHECK(left > 0 && left <= 32);
+   CHECK(h->rule(127, 24, 127, 127).visible && h->rule(127, 24, 127, 127).x == 0);
    // Vertical: the columns slide up and down (a period of 32 columns on 128), 32 steps for 32 rows.
    auto v = makeNamed("wave", "vertical", 128, 32);
-   CHECK(v->maxSteps() == 32);
-   const transitions::Rule down = v->rule(8, 20, 8, 32); // column 8 is a crest: moved down by 8
-   CHECK(down.visible && down.x == 8 && down.y == 12);
-   CHECK(!v->rule(8, 3, 8, 32).visible);
+   CHECK(v->maxSteps() == 31);
+   const transitions::Rule down = v->rule(8, 20, 8, 31); // column 8 is a crest: moved down by 8 + 4 + 4
+   CHECK(down.visible && down.x == 8 && down.y == 4);
+   CHECK(!v->rule(8, 3, 8, 31).visible);
 }
+
+// ---- Melt, and the other frame that moves in with the effect ----------------------------------
+
+void testMelt()
+{
+   // The drips: a speed of 0 .. 255 for every column, always the same, stretched to both ends.
+   const std::vector<uint8_t> speeds = transitions::dripSpeeds(128);
+   CHECK(speeds == transitions::dripSpeeds(128) && speeds.size() == 128);
+   CHECK(*std::min_element(speeds.begin(), speeds.end()) == 0 && *std::max_element(speeds.begin(), speeds.end()) == 255);
+   long within = 0, between = 0; // neighbours in a group of four are more alike than neighbours of two groups
+   for (size_t i = 1; i < speeds.size(); ++i)
+      (i % 4 ? within : between) += std::abs(static_cast<int>(speeds[i]) - static_cast<int>(speeds[i - 1]));
+   CHECK(within / 3 < between / 1 && between > 0);
+   CHECK(transitions::dripSpeeds(1).size() == 1 && transitions::dripSpeeds(0).empty());
+
+   auto smooth = makeNamed("melt", "smooth", 128, 32);
+   auto drips = makeNamed("melt", "drips", 128, 32);
+   auto wave = makeNamed("wave", "vertical", 128, 32);
+   CHECK(smooth->maxSteps() == 31 && drips->maxSteps() == 31 && wave->maxSteps() == 31);
+   // Smooth melts like the vertical wave; dripping does not.
+   bool smoothLikeWave = true, dripsDiffer = false;
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         const transitions::Rule a = smooth->rule(x, y, 12, 31), b = wave->rule(x, y, 12, 31), c = drips->rule(x, y, 12, 31);
+         smoothLikeWave = smoothLikeWave && a.visible == b.visible && (!a.visible || (a.x == b.x && a.y == b.y));
+         dripsDiffer = dripsDiffer || a.visible != c.visible || (a.visible && a.y != c.y);
+      }
+   CHECK(smoothLikeWave && dripsDiffer);
+   // The columns only go down: a column shows the picture from further up, every pixel at least `pull` down.
+   for (uint32_t x = 0; x < 128; ++x)
+      for (uint32_t y = 0; y < 32; ++y)
+      {
+         const transitions::Rule r = drips->rule(x, y, 12, 31);
+         CHECK(!r.visible || (r.x == x && r.y + 12 <= y));
+      }
+   // The last frame: only the slowest column(s) show a bit, one row of them.
+   long left = 0;
+   for (uint32_t y = 0; y < 32; ++y)
+      for (uint32_t x = 0; x < 128; ++x)
+         left += drips->rule(x, y, 31, 31).visible;
+   CHECK(left >= 1 && left <= 8);
+}
+
+void testSecondMoves()
+{
+   // Only the transitions that have a pattern to follow offer it.
+   for (const auto& t : transitions::kTransitions)
+   {
+      const std::string id = t.id;
+      CHECK(t.canMoveSecond == (id == "slide" || id == "alternating_slide" || id == "wave" || id == "melt"));
+   }
+
+   // Without the option nothing changes: what the effect uncovers shows the other frame in place
+   // (an invisible rule), whatever the target.
+   auto still = makeNamed("slide", "left", 128, 32, true, false);
+   CHECK(!still->rule(127, 5, 10, 20).visible);
+
+   // Slide Left: the other frame follows right behind, like the next picture of a film strip.
+   const uint32_t steps = 20;
+   auto push = makeNamed("slide", "left", 128, 32, true, true);
+   for (uint32_t step = 1; step <= steps; ++step)
+   {
+      const uint32_t o = transitions::offsetAt(128, step, steps);
+      for (uint32_t y = 0; y < 32; ++y)
+         for (uint32_t x = 0; x < 128; ++x)
+         {
+            const transitions::Rule r = push->rule(x, y, step, steps);
+            CHECK(r.visible && r.y == y && r.x < 128);
+            if (x + o < 128)
+               CHECK(!r.second && r.x == x + o);
+            else
+               CHECK(r.second && r.x == x + o - 128); // the other frame's left edge touches the first frame's right edge
+         }
+   }
+   // The others go the other ways: Right, Up, Down.
+   auto right = makeNamed("slide", "right", 128, 32, true, true);
+   const uint32_t o = transitions::offsetAt(128, 7, steps);
+   CHECK(right->rule(o - 1, 0, 7, steps).second && right->rule(o - 1, 0, 7, steps).x == 127);
+   CHECK(!right->rule(o, 0, 7, steps).second && right->rule(o, 0, 7, steps).x == 0);
+   auto down = makeNamed("slide", "down", 128, 32, true, true);
+   const uint32_t od = transitions::offsetAt(32, 7, steps);
+   CHECK(down->rule(5, od - 1, 7, steps).second && down->rule(5, od - 1, 7, steps).y == 31);
+   auto up = makeNamed("slide", "up", 128, 32, true, true);
+   CHECK(up->rule(5, 32 - od, 7, steps).second && up->rule(5, 32 - od, 7, steps).y == 0);
+
+   // Every effect that moves its second frame in shows a picture everywhere, always inside the
+   // frame, and the first frame goes while the second takes over: the first frame's share only shrinks.
+   struct Kind { const char* id; const char* option; };
+   const Kind kinds[] = {{"slide", "left"},  {"slide", "right"}, {"slide", "up"},  {"slide", "down"},
+                         {"alternating_slide", "horizontal"}, {"alternating_slide", "vertical"},
+                         {"wave", "horizontal"}, {"wave", "vertical"}, {"melt", "smooth"}, {"melt", "drips"}};
+   for (const Kind& k : kinds)
+      for (uint32_t w : {128u, 129u, 192u})
+      {
+         const uint32_t h = w == 129u ? 33u : w == 192u ? 64u : 32u;
+         auto e = makeNamed(k.id, k.option, w, h, true, true);
+         const uint32_t most = e->maxSteps();
+         size_t before = static_cast<size_t>(w) * h;
+         for (uint32_t step = 1; step <= most; ++step)
+         {
+            size_t first = 0;
+            for (uint32_t y = 0; y < h; ++y)
+               for (uint32_t x = 0; x < w; ++x)
+               {
+                  const transitions::Rule r = e->rule(x, y, step, most);
+                  CHECK(r.visible && r.x < w && r.y < h);
+                  first += !r.second;
+               }
+            CHECK(first > 0 && first <= before); // some of the first frame is left at the end
+            before = first;
+         }
+      }
+
+   // Melt, Smooth, following: a column shows the other frame on top, ending where the first frame
+   // starts, so the two pictures meet without a gap or an overlap.
+   auto melt = makeNamed("melt", "drips", 128, 32, true, true);
+   for (uint32_t step : {3u, 10u, 21u, 31u})
+      for (uint32_t x = 0; x < 128; ++x)
+      {
+         uint32_t top = 0; // rows of the other frame
+         while (top < 32 && melt->rule(x, top, step, 31).second)
+            ++top;
+         for (uint32_t y = 0; y < 32; ++y)
+         {
+            const transitions::Rule r = melt->rule(x, y, step, 31);
+            CHECK(r.second == (y < top)); // the other frame on top, and nowhere else
+            if (r.second)
+               CHECK(r.y == y + 32 - top); // its bottom row meets the first frame
+         }
+         if (top > 0 && top < 32)
+            CHECK(melt->rule(x, top, step, 31).y == 0); // the first frame starts at its top
+      }
+}
+
+void testSecondMovesWindow()
+{
+   // The "Second frame" field: only for another frame and for the transitions that can do it.
+   resetProject(128, 32, false);
+   g_frames[1] = makeSecondFrame(false);
+   selectTwo(0, 1);
+   openMenu();
+   CHECK(fieldOf("second_motion") && !fieldOf("second_motion")->visible);
+   change("target", "frame");
+   change("transition", "melt");
+   CHECK(fieldOf("second_motion")->visible);
+   change("transition", "dissolve");
+   CHECK(!fieldOf("second_motion")->visible);
+   change("transition", "melt");
+   change("option", "smooth");
+   change("frames", "3");
+   change("placement", "end");
+   change("second_motion", "moves");
+   closeForm(true);
+   CHECK(g_frames.size() == 5);
+   CHECK(g_status.size() == 1 && g_status[0].find("Melt (Smooth) to frame 1, moving in with it") != std::string::npos);
+   // The other frame is on top of the new frames, in the first column: the picture's rows follow the melt.
+   const Frame& a = g_frames[0];
+   const Frame& b = g_frames[1];
+   for (int k = 0; k < 3 && g_frames.size() == 5; ++k)
+   {
+      const Frame& n = g_frames[2 + k];
+      long fromSecond = 0, black = 0;
+      for (size_t p = 0; p < n.sd.size(); ++p)
+      {
+         const bool isA = n.sd[p] == a.sd[p], isB = n.sd[p] == b.sd[p];
+         fromSecond += isB && !isA;
+         black += n.sd[p] == 0;
+      }
+      CHECK(black == 0 && fromSecond > 0);
+   }
+
+   // Closed with the choice "stays in place": the other frame stays under it (the same frames as without the option).
+   g_status.clear();
+   selectTwo(0, 1);
+   openMenu();
+   change("target", "frame");
+   change("transition", "melt");
+   CHECK(fieldOf("second_motion")->value == "moves"); // the last choice is remembered
+   change("second_motion", "still");
+   change("frames", "3");
+   change("placement", "end");
+   closeForm(true);
+   CHECK(g_status.size() == 1 && g_status[0].find("Melt (Smooth) to frame 1") != std::string::npos &&
+         g_status[0].find("moving in") == std::string::npos);
+}
+
 
 void testCheckerboard()
 {
@@ -2377,6 +2587,9 @@ int main()
    testPixelate();
    testZoom();
    testWave();
+   testMelt();
+   testSecondMoves();
+   testSecondMovesWindow();
    testCheckerboard();
    testGoingThroughBothFrames();
    // Every transition through the window, on the sizes of real projects (single plane at the

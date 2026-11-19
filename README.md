@@ -13,10 +13,11 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 | **Checkerboard** | 2 x 2, 4 x 4, 8 x 8, 16 x 16 | The picture is cut into squares of the size you choose. They disappear one by one: first the squares of one color of a checkerboard, sweeping from the top left corner, then the others. One square is left at the end. |
 | **Dissolve** | Orderly, Random | Pixels disappear in a regular pattern, or at random. |
 | **Fade** | | The picture gets darker (to black) or brighter (to white) with every frame. |
-| **Pixelate** | | The picture turns into bigger and bigger blocks (each shows the pixel at its middle), up to blocks as big as the frame is tall. |
+| **Melt** | Smooth, Dripping | The picture melts down off the screen: every column slides down at its own speed. Smooth: the speeds follow a wave (the same as Wave, Vertical). Dripping: the speeds look random, in streaks, like paint dripping. A thin sliver of the slowest column is left at the end. |
+| **Pixelate** | | The picture turns into bigger and bigger blocks (each shows the pixel at its middle), up to blocks as big as the frame is tall. The blocks grow slowly at first and faster later. |
 | **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
-| **Wave** | Horizontal, Vertical | A wave runs through the picture and grows. Horizontal: the rows slide sideways, in one wave over the height. Vertical: the columns slide up and down, in four waves over the width. The crests of the wave leave the frame, so what is left is the parts near the middle of the wave. |
+| **Wave** | Horizontal, Vertical | The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves over the width. The crests go twice as fast as the troughs, so the last frames show only thin slivers of the troughs. |
 | **Wipe** | Up, Down, Left, Right, Centre-Out, Edge-In, Spiral | A bar wipes over the picture in the direction you choose (Left: it comes in from the right edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture closes in from the outside edges. Spiral: a spiral winds in from the top left corner. |
 | **Zoom** | In, Out | In: the picture grows toward you, a smaller and smaller part of the middle fills the frame (down to an eighth of the width). Out: the picture shrinks toward the middle (down to a sixteenth of the width). |
 
@@ -132,8 +133,14 @@ other selected frame the end; the note at the top of the window says "From frame
 and the window follows when you select other frames. The preview shows your two frames.
 
 - Slide, Wipe, Split, Blinds, Dissolve, Alternating Slide, Checkerboard, Wave and Zoom Out take
-  pixels of the start frame away, and the other frame shows underneath, where they were. The other
-  frame stays still.
+  pixels of the start frame away, and the other frame shows underneath, where they were. By
+  default the other frame stays still.
+- **Second frame:** Slide, Alternating Slide, Wave and Melt also have a `Second frame` choice.
+  `Stays in place, revealed` is what is described above. `Moves in with the effect` makes the other
+  frame follow the start frame in, in the same pattern: a slide pushes it in right behind the start
+  frame, alternating lines bring it in line by line, a wave or a melt lets each row or column of it
+  arrive at the speed of the same row or column of the start frame (a melt lets it drip in from the
+  top). The choice is only shown for those transitions.
 - Pixelate and Zoom In keep every pixel, so nothing is taken away: they go through both frames.
   The start frame turns into blocks (or zooms in) and then the other frame comes out of the blocks
   (or zooms back out to full size). Their most frames is twice that of a transition to black.

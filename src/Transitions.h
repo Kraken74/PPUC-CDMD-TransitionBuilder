@@ -53,6 +53,8 @@ struct SourceInfo
    std::vector<uint16_t> colors;  // the distinct RGB565 colors of the colorized pictures
    bool toWhite = false;          // the transition goes to white instead of black (what a fade needs to know)
    bool toFrame = false;          // the transition goes to another frame (shown underneath)
+   bool secondMoves = false;      // toFrame: the other frame comes in with the effect, in its pattern,
+                                  // instead of staying in place underneath
    uint32_t crossSpan = 0;        // toFrame: the largest color difference between the two frames, in
                                   // units of a 5-bit channel (what a cross-fade needs to know)
 };
@@ -268,6 +270,19 @@ inline uint32_t ladderLevel(uint32_t levels, uint32_t step, uint32_t steps)
    return static_cast<uint32_t>((static_cast<uint64_t>(step) * levels + steps - 1u) / steps);
 }
 
+// Where the other frame shows on a line of `extent` places when the first frame's picture is moved
+// along the line by `shift` (positive: toward higher places) and the other frame follows right
+// behind it, like the next picture of a film strip. `pos` is a place the first picture does not
+// cover. A frame that has arrived stays at home, so a shift of more than a whole frame is the same
+// as a shift of exactly one.
+inline uint32_t followingPlace(uint32_t pos, uint32_t extent, int64_t shift)
+{
+   const int64_t e = static_cast<int64_t>(extent);
+   const int64_t at = shift >= 0 ? static_cast<int64_t>(pos) + e - std::min(shift, e)
+                                 : static_cast<int64_t>(pos) - e - std::max(shift, -e);
+   return static_cast<uint32_t>(std::max<int64_t>(0, std::min(e - 1, at)));
+}
+
 // ---- Pixelate -------------------------------------------------------------------------------
 
 // The picture turns into bigger and bigger blocks, each one showing the pixel at its middle. To
@@ -286,7 +301,7 @@ public:
    bool takesPixelsAway() const override { return false; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
    {
-      const uint32_t level = ladderLevel(levels(), step, steps);
+      const uint32_t level = easedLevel(step, steps);
       const bool second = level > m_blocks;
       const uint32_t block = 1u + (second ? 2u * m_blocks + 1u - level : level); // 2 .. largest
       return {true, std::min(m_width - 1u, x / block * block + block / 2u),
@@ -295,6 +310,23 @@ public:
 
 private:
    uint32_t levels() const { return m_toFrame ? 2u * m_blocks : m_blocks; }
+   // The blocks start growing slowly and speed up (a square of the progress). Never slower than one
+   // size per frame, so that every frame still differs from the one before.
+   uint32_t easeIn(uint32_t n, uint32_t d, uint32_t span) const
+   {
+      return static_cast<uint32_t>((static_cast<uint64_t>(span) * n * n + static_cast<uint64_t>(d) * d - 1u) /
+                                   (static_cast<uint64_t>(d) * d));
+   }
+   uint32_t easedLevel(uint32_t step, uint32_t steps) const
+   {
+      if (!m_toFrame)
+         return std::min(m_blocks, std::max(step, easeIn(step, steps, m_blocks)));
+      if (2u * step <= steps) // the first frame's blocks grow
+         return std::min(m_blocks, std::max(step, easeIn(2u * step, steps, m_blocks)));
+      const uint32_t back = steps - step; // the other frame's blocks shrink, slowly at the end
+      const uint32_t size = std::max(back + 1u, easeIn(2u * back, steps, m_blocks));
+      return 2u * m_blocks + 1u - std::min(size, m_blocks);
+   }
    uint32_t m_width, m_height;
    bool m_toFrame;
    uint32_t m_blocks;
@@ -385,37 +417,81 @@ inline int32_t waveShift(uint32_t place, uint32_t period, uint32_t amplitude)
    return static_cast<int32_t>(down ? -magnitude : magnitude);
 }
 
-// Wave: the rows (Horizontal) slide sideways, or the columns (Vertical) slide up and down, by a
-// wave that grows from one step to the next, until the crests of the wave have left the frame.
-// What the wave uncovers at the edges is black (or white, or the other frame).
-class Wave final : public Effect
+// How fast the columns of a melt drip: a number 0 .. 255 for every place along the line, that
+// looks random but is the same on every compiler. Neighbours go in groups of four with a little
+// jitter, like paint that drips in streaks, and the table is stretched so that the slowest place
+// is exactly 0 and the fastest exactly 255: one place is always the last to leave.
+inline std::vector<uint8_t> dripSpeeds(uint32_t extent)
+{
+   std::vector<uint32_t> raw(extent);
+   for (uint32_t i = 0; i < extent; ++i)
+      raw[i] = (3u * static_cast<uint32_t>(mix64(i / 4u * 2u + 1u) & 255u) + static_cast<uint32_t>(mix64(i * 2u) & 255u)) / 4u;
+   const uint32_t lo = extent ? *std::min_element(raw.begin(), raw.end()) : 0u;
+   const uint32_t hi = extent ? *std::max_element(raw.begin(), raw.end()) : 0u;
+   std::vector<uint8_t> out(extent, 0);
+   for (uint32_t i = 0; i < extent; ++i)
+      out[i] = hi > lo ? static_cast<uint8_t>((raw[i] - lo) * 255u / (hi - lo)) : 0u;
+   return out;
+}
+
+// Wave and Melt: every row (Horizontal: slides to the right) or column (Vertical: slides down) is
+// pulled out of the frame, each by a different amount, so the picture turns into a curtain that
+// is pulled out. The slowest rows are pulled one pixel per step, the others up to twice as far, and
+// a thin sliver of the slowest is left at the end. What it uncovers is black (or white, or the
+// other frame, which can follow behind in the same pattern).
+//   Wave: the speeds follow a wave: one over the height for the rows, four over the width for the columns.
+//   Drips: the speeds look random, like paint dripping (Melt).
+class Curtain final : public Effect
 {
 public:
-   Wave(bool horizontal, uint32_t width, uint32_t height)
-      : m_horizontal(horizontal), m_width(width), m_height(height)
+   enum class Speeds { Wave, Drips };
+   Curtain(bool horizontal, Speeds speeds, uint32_t width, uint32_t height, bool follow = false)
+      : m_horizontal(horizontal), m_speeds(speeds), m_width(width), m_height(height), m_follow(follow)
    {
-      const uint32_t across = horizontal ? height : width; // the wave runs along this axis
-      // One wave over the height for the rows, four over the width for the columns.
+      const uint32_t across = horizontal ? height : width; // the pattern runs along this axis
       m_period = std::max(8u, (horizontal ? across : across / 4u) / 4u * 4u);
+      if (speeds == Speeds::Drips)
+         m_drips = dripSpeeds(across);
    }
-   uint32_t maxSteps() const override { return std::min(kMaxSteps, m_horizontal ? m_width : m_height); }
-   const char* limitReason() const override { return "the wave grows one pixel at a time"; }
+   uint32_t maxSteps() const override { return std::min(kMaxSteps, levels()); }
+   const char* limitReason() const override { return "the picture moves one pixel at a time"; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
    {
-      const uint32_t amplitude = ladderLevel(m_horizontal ? m_width : m_height, step, steps);
-      if (m_horizontal)
+      // Every row is pulled out by `pull` at least; the pattern adds up to the same again.
+      const uint32_t pull = ladderLevel(levels(), step, steps);
+      const uint32_t along = m_horizontal ? y : x; // the place in the pattern
+      const uint32_t pos = m_horizontal ? x : y;   // the place on the line that is pulled
+      const uint32_t extent = m_horizontal ? m_width : m_height;
+      int64_t shift = pull;
+      if (m_speeds == Speeds::Wave)
       {
-         const int64_t from = static_cast<int64_t>(x) - waveShift(y, m_period, amplitude);
-         return from >= 0 && from < m_width ? Rule{true, static_cast<uint32_t>(from), y} : Rule{false, 0, 0};
+         const uint32_t amplitude = pull / 2u;
+         shift += amplitude + waveShift(along, m_period, amplitude);
       }
-      const int64_t from = static_cast<int64_t>(y) - waveShift(x, m_period, amplitude);
-      return from >= 0 && from < m_height ? Rule{true, x, static_cast<uint32_t>(from)} : Rule{false, 0, 0};
+      else
+         shift += static_cast<int64_t>(pull) * m_drips[along] / 256;
+      const int64_t from = static_cast<int64_t>(pos) - shift;
+      if (from >= 0 && from < extent)
+         return m_horizontal ? Rule{true, static_cast<uint32_t>(from), y} : Rule{true, x, static_cast<uint32_t>(from)};
+      if (!m_follow)
+         return {false, 0, 0};
+      const uint32_t other = followingPlace(pos, extent, shift);
+      return m_horizontal ? Rule{true, other, y, true} : Rule{true, x, other, true};
    }
 
 private:
+   // The slowest rows are pulled out one pixel per step, until one column (or row) is left.
+   uint32_t levels() const
+   {
+      const uint32_t extent = m_horizontal ? m_width : m_height;
+      return extent > 1u ? extent - 1u : 0u;
+   }
    bool m_horizontal;
+   Speeds m_speeds;
    uint32_t m_width, m_height;
+   bool m_follow;
    uint32_t m_period = 8;
+   std::vector<uint8_t> m_drips;
 };
 
 // ---- Checkerboard ---------------------------------------------------------------------------
@@ -485,19 +561,30 @@ inline uint32_t offsetAt(uint32_t extent, uint32_t step, uint32_t steps)
 
 inline bool isHorizontalMove(Direction d) { return d == Direction::Left || d == Direction::Right; }
 
-// One pixel of a picture moved by `offset` in a direction, on a width x height frame.
-inline Rule movedPixel(Direction d, uint32_t x, uint32_t y, uint32_t offset, uint32_t width, uint32_t height)
+// One pixel of a picture moved by `offset` in a direction, on a width x height frame. What the
+// move uncovers is nothing, or the other frame following behind (`follow`).
+inline Rule movedPixel(Direction d, uint32_t x, uint32_t y, uint32_t offset, uint32_t width, uint32_t height,
+                       bool follow = false)
 {
+   const int64_t o = offset;
    switch (d)
    {
    case Direction::Left:
-      return x + offset < width ? Rule{true, x + offset, y} : Rule{false, 0, 0};
+      if (x + offset < width)
+         return {true, x + offset, y};
+      return follow ? Rule{true, followingPlace(x, width, -o), y, true} : Rule{false, 0, 0};
    case Direction::Right:
-      return x >= offset ? Rule{true, x - offset, y} : Rule{false, 0, 0};
+      if (x >= offset)
+         return {true, x - offset, y};
+      return follow ? Rule{true, followingPlace(x, width, o), y, true} : Rule{false, 0, 0};
    case Direction::Up:
-      return y + offset < height ? Rule{true, x, y + offset} : Rule{false, 0, 0};
+      if (y + offset < height)
+         return {true, x, y + offset};
+      return follow ? Rule{true, x, followingPlace(y, height, -o), true} : Rule{false, 0, 0};
    case Direction::Down:
-      return y >= offset ? Rule{true, x, y - offset} : Rule{false, 0, 0};
+      if (y >= offset)
+         return {true, x, y - offset};
+      return follow ? Rule{true, x, followingPlace(y, height, o), true} : Rule{false, 0, 0};
    }
    return {false, 0, 0};
 }
@@ -506,21 +593,22 @@ inline Rule movedPixel(Direction d, uint32_t x, uint32_t y, uint32_t offset, uin
 class Slide final : public Effect
 {
 public:
-   Slide(Direction direction, uint32_t width, uint32_t height)
-      : m_direction(direction), m_width(width), m_height(height)
+   Slide(Direction direction, uint32_t width, uint32_t height, bool follow = false)
+      : m_direction(direction), m_width(width), m_height(height), m_follow(follow)
    {
    }
    uint32_t maxSteps() const override { return std::min(kMaxSteps, travelOf(extent())); }
    const char* limitReason() const override { return "the picture moves in whole pixels"; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
    {
-      return movedPixel(m_direction, x, y, offsetAt(extent(), step, steps), m_width, m_height);
+      return movedPixel(m_direction, x, y, offsetAt(extent(), step, steps), m_width, m_height, m_follow);
    }
 
 private:
    uint32_t extent() const { return isHorizontalMove(m_direction) ? m_width : m_height; }
    Direction m_direction;
    uint32_t m_width, m_height;
+   bool m_follow;
 };
 
 // Wipe: a black bar moves over the picture in the direction (Left: it comes in from the right
@@ -560,7 +648,10 @@ private:
 class AlternatingSlide final : public Effect
 {
 public:
-   AlternatingSlide(bool rows, uint32_t width, uint32_t height) : m_rows(rows), m_width(width), m_height(height) {}
+   AlternatingSlide(bool rows, uint32_t width, uint32_t height, bool follow = false)
+      : m_rows(rows), m_width(width), m_height(height), m_follow(follow)
+   {
+   }
    uint32_t maxSteps() const override { return std::min(kMaxSteps, travelOf(extent())); }
    const char* limitReason() const override { return "the lines move in whole pixels"; }
    Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const override
@@ -570,13 +661,14 @@ public:
       const bool odd = ((m_rows ? y : x) % 2u) == 0u;
       const Direction d = m_rows ? (odd ? Direction::Left : Direction::Right)
                                  : (odd ? Direction::Up : Direction::Down);
-      return movedPixel(d, x, y, offset, m_width, m_height);
+      return movedPixel(d, x, y, offset, m_width, m_height, m_follow);
    }
 
 private:
    uint32_t extent() const { return m_rows ? m_width : m_height; }
    bool m_rows;
    uint32_t m_width, m_height;
+   bool m_follow;
 };
 
 // Split: the picture is cut in the middle; the two halves move apart (vertical: a vertical cut,
@@ -794,9 +886,13 @@ struct Transition
    const Option* options;
    size_t optionCount;
    std::unique_ptr<Effect> (*make)(const char* optionId, const SourceInfo& source);
+   bool canMoveSecond = false; // in a transition to another frame, that frame can come in with the effect
 };
 
 inline bool same(const char* a, const char* b) { return std::string_view(a) == std::string_view(b); }
+
+// A transition to another frame whose other frame comes in with the effect.
+inline bool follows(const SourceInfo& s) { return s.toFrame && s.secondMoves; }
 
 inline std::unique_ptr<Effect> makeDissolve(const char* option, const SourceInfo& s)
 {
@@ -814,7 +910,7 @@ inline Direction directionOf(const char* option)
 
 inline std::unique_ptr<Effect> makeSlide(const char* option, const SourceInfo& s)
 {
-   return std::make_unique<Slide>(directionOf(option), s.width, s.height);
+   return std::make_unique<Slide>(directionOf(option), s.width, s.height, follows(s));
 }
 inline std::unique_ptr<Effect> makeWipe(const char* option, const SourceInfo& s)
 {
@@ -840,7 +936,13 @@ inline std::unique_ptr<Effect> makePixelate(const char*, const SourceInfo& s)
 }
 inline std::unique_ptr<Effect> makeWave(const char* option, const SourceInfo& s)
 {
-   return std::make_unique<Wave>(!same(option, "vertical"), s.width, s.height);
+   return std::make_unique<Curtain>(!same(option, "vertical"), Curtain::Speeds::Wave, s.width, s.height, follows(s));
+}
+// Melt: the columns drip down, in a wave of speeds (Smooth) or at random-looking speeds (Dripping).
+inline std::unique_ptr<Effect> makeMelt(const char* option, const SourceInfo& s)
+{
+   return std::make_unique<Curtain>(false, same(option, "drips") ? Curtain::Speeds::Drips : Curtain::Speeds::Wave,
+                                    s.width, s.height, follows(s));
 }
 inline std::unique_ptr<Effect> makeZoom(const char* option, const SourceInfo& s)
 {
@@ -854,7 +956,7 @@ inline std::unique_ptr<Effect> makeFade(const char*, const SourceInfo& s)
 }
 inline std::unique_ptr<Effect> makeAlternatingSlide(const char* option, const SourceInfo& s)
 {
-   return std::make_unique<AlternatingSlide>(!same(option, "vertical"), s.width, s.height);
+   return std::make_unique<AlternatingSlide>(!same(option, "vertical"), s.width, s.height, follows(s));
 }
 // Split: Vertical cuts down the middle (the halves move left and right), Horizontal cuts across
 // the middle (the halves move up and down).
@@ -875,6 +977,9 @@ inline const Option kOrientationOptions[] = {
 inline const Option kSquareOptions[] = {
    {"2", "2 x 2"}, {"4", "4 x 4"}, {"8", "8 x 8"}, {"16", "16 x 16"},
 };
+inline const Option kMeltOptions[] = {
+   {"smooth", "Smooth"}, {"drips", "Dripping"},
+};
 inline const Option kZoomOptions[] = {
    {"in", "In"}, {"out", "Out"},
 };
@@ -890,7 +995,7 @@ inline const Transition kTransitions[] = {
     "Lines slide off in turns. Horizontal: the 1st, 3rd, 5th ... row slide left and the 2nd, "
     "4th, 6th ... row slide right. Vertical: the 1st, 3rd, 5th ... column go up and the 2nd, "
     "4th, 6th ... column go down. A thin strip of each line is left at the end.",
-    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide},
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide, true},
    {"blinds", "Blinds",
     "Bars appear at regular intervals and grow wider until only thin slits of the picture are "
     "left. Horizontal: horizontal bars, stacked. Vertical: vertical bars, side by side.",
@@ -909,6 +1014,11 @@ inline const Transition kTransitions[] = {
     "almost black or almost white, but not quite. Color rotations of the new frames are "
     "removed, because they would not fade.",
     nullptr, nullptr, 0, &makeFade},
+   {"melt", "Melt",
+    "The picture melts down off the screen: every column slides down at its own speed. Smooth: "
+    "the speeds follow a wave. Dripping: the speeds look random, like paint dripping. A thin "
+    "sliver of the slowest column is left at the end.",
+    "Style", kMeltOptions, TB_COUNT(kMeltOptions), &makeMelt, true},
    {"pixelate", "Pixelate",
     "The picture turns into bigger and bigger blocks. To another frame: the first frame turns "
     "into blocks, then the other frame comes out of the blocks and sharpens.",
@@ -916,17 +1026,18 @@ inline const Transition kTransitions[] = {
    {"slide", "Slide",
     "The whole picture slides off the screen in the direction you choose. A thin strip of it "
     "is left at the end.",
-    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide},
+    "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide, true},
    {"split", "Split",
     "The picture is cut in the middle and the two halves slide apart, until a thin strip of "
     "each is left at the edges. Horizontal: cut across, the top half slides up and the bottom "
     "half down. Vertical: cut down, the left half slides left and the right half right.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
    {"wave", "Wave",
-    "The picture ripples. Horizontal: the rows slide sideways in a wave that grows. Vertical: "
-    "the columns slide up and down in a wave that grows. The crests of the wave leave the frame "
-    "at the end.",
-    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeWave},
+    "The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows "
+    "slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves "
+    "over the width. The crests go twice as fast as the troughs; thin slivers of the troughs are "
+    "left at the end.",
+    "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeWave, true},
    {"wipe", "Wipe",
     "A bar wipes over the picture in the direction you choose (Left: it comes in from the right "
     "edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture "
@@ -939,7 +1050,7 @@ inline const Transition kTransitions[] = {
     "full size. Zoom Out: the picture shrinks toward the middle.",
     "Zoom", kZoomOptions, TB_COUNT(kZoomOptions), &makeZoom},
 };
-inline constexpr size_t kTransitionCount = 11;
+inline constexpr size_t kTransitionCount = 12;
 static_assert(sizeof(kTransitions) / sizeof(kTransitions[0]) == kTransitionCount, "update kTransitionCount");
 
 #undef TB_COUNT
