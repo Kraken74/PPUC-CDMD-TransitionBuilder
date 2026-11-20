@@ -31,6 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The version is in src/Version.h (1.01 gives v1.01): it goes into the name of the download.
+      - name: Read the version
+        id: version
+        shell: bash
+        run: echo "tag=v$(sed -n 's/.*kVersion = "\([0-9.]*\)".*/\1/p' src/Version.h)" >> "$GITHUB_OUTPUT"
+
       - name: Configure
         shell: bash
         run: cmake -S . -B build ${{ matrix.args }} -DCMAKE_BUILD_TYPE=Release
@@ -46,7 +52,7 @@ jobs:
       - name: Upload the plugin
         uses: actions/upload-artifact@v4
         with:
-          name: TransitionFX-${{ matrix.name }}
+          name: TransitionFX-${{ matrix.name }}_${{ steps.version.outputs.tag }}
           path: dist
 
       # The tests come after the upload, so a failing test never hides the plugin.
@@ -69,6 +75,12 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        run: echo "tag=v$(sed -n 's/.*kVersion = "\([0-9.]*\)".*/\1/p' src/Version.h)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           pattern: TransitionFX-*
@@ -80,5 +92,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TransitionFX-all-platforms
+          name: TransitionFX-all-platforms_${{ steps.version.outputs.tag }}
           path: all

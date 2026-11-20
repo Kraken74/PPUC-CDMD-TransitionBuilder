@@ -18,6 +18,7 @@
 
 #include "ColorizingDMDPlugin.h"
 #include "Preview.h"
+#include "Language.h"
 #include "Transitions.h"
 #include "Version.h"
 #include "plugins/MsgPlugin.h"
@@ -644,9 +645,25 @@ void fireEvent(const char* name)
          s.callback(id, s.userData, nullptr);
 }
 
+std::string g_language = "en"; // what the fake editor's GetLanguage says; empty: it does not know
+
+int MSGPIAPI fGetLanguage(char* code, uint32_t capacity)
+{
+   if (g_language.empty())
+      return 0;
+   const uint32_t size = static_cast<uint32_t>(g_language.size() + 1);
+   if (capacity >= size)
+      std::memcpy(code, g_language.c_str(), size);
+   return static_cast<int>(size);
+}
+
+int MSGPIAPI fIsDarkTheme() { return 1; }
+
 void setUpApi()
 {
-   g_api.version = 10;
+   g_api.version = 12;
+   g_api.GetLanguage = fGetLanguage;
+   g_api.IsDarkTheme = fIsDarkTheme;
    g_api.GetProjectInfo = fGetProjectInfo;
    g_api.GetFrameInfo = fGetFrameInfo;
    g_api.GetOriginalFrame = fGetOriginalFrame;
@@ -819,12 +836,30 @@ transitions::SourceInfo makeInfo(uint32_t w, uint32_t h, bool toWhite = false)
    for (uint32_t s = 1; s <= 3; ++s)
       for (uint32_t k = 0; k < 5; ++k)
          info.colors.push_back(static_cast<uint16_t>(0x0841 * (1 + s) + k * 0x0020));
+   // Two pictures for the pixel effects: an oval with a ring (shades 3 and 2) on a background of
+   // shade 1, and a rectangle with a bar, in other places.
+   info.shades.assign(static_cast<size_t>(w) * h, 1);
+   info.shadesSecond.assign(static_cast<size_t>(w) * h, 1);
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+      {
+         const double dx = (x - w * 0.4) / (w * 0.25), dy = (y - h * 0.5) / (h * 0.4);
+         const double d = dx * dx + dy * dy;
+         if (d < 0.5)
+            info.shades[static_cast<size_t>(y) * w + x] = 3;
+         else if (d < 1.0)
+            info.shades[static_cast<size_t>(y) * w + x] = 2;
+         if (x > w * 0.55 && x < w * 0.9 && y > h * 0.2 && y < h * 0.8)
+            info.shadesSecond[static_cast<size_t>(y) * w + x] = (y > h * 0.45 && y < h * 0.55) ? 3 : 2;
+      }
    return info;
 }
 
 std::unique_ptr<transitions::Effect> makeEffect(const Case& c, uint32_t w, uint32_t h)
 {
-   return c.transition->make(c.option ? c.option->id : "", makeInfo(w, h, c.toWhite));
+   transitions::SourceInfo info = makeInfo(w, h, c.toWhite);
+   info.toFrame = c.transition->needsFrame;
+   return c.transition->make(c.option ? c.option->id : "", info);
 }
 
 bool isFade(const Case& c) { return transitions::same(c.transition->id, "fade"); }
@@ -941,7 +976,7 @@ void testEveryEffectOnEverySize()
          }
 
          // The maximum is tight: one more and a frame repeats (when 255 does not cap it).
-         if (most < transitions::kMaxSteps)
+         if (most < transitions::kMaxSteps && !e->movesPixels())
          {
             std::set<std::vector<uint64_t>> s;
             for (uint32_t step = 1; step <= most + 1; ++step)
@@ -964,7 +999,7 @@ void testEveryEffectOnEverySize()
             // Pixels only leave: strictly fewer visible pixels with every step (but not for the
             // effects that keep every pixel on the screen: all of them stay).
             size_t before = static_cast<size_t>(w) * h;
-            for (uint32_t step = 1; step <= most; ++step)
+            for (uint32_t step = 1; step <= most && !e->movesPixels(); ++step)
             {
                const size_t now = visibleCount(*e, w, h, step, most);
                if (e->takesPixelsAway())
@@ -1310,9 +1345,11 @@ void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
 {
    for (const Case& c : allCases(true))
    {
+      if (c.transition->needsFrame)
+         continue; // goes to another frame only (testMorph)
       resetProject(w, h, zones);
       g_frames[0].comparisonMask = 3; // the source has a mask; the new frames must not
-      const uint32_t frames = 5;
+      const uint32_t frames = transitions::same(c.transition->id, "dust") ? 3 : 5; // Dust has fewer frames on a busy picture
       if (!runFlow(c.transition->id, c.option ? c.option->id : nullptr, frames, "end", c.toWhite ? "white" : "black"))
       {
          std::printf("flow failed for %s on %ux%u\n", c.name().c_str(), w, h);
@@ -1327,7 +1364,7 @@ void testEveryTransitionThroughTheWindow(uint32_t w, uint32_t h, bool zones)
          continue;
       }
       checkNewFrames(frames, zones);
-      CHECK(g_status.size() == 1 && g_status[0].find("added 5 frame(s)") != std::string::npos);
+      CHECK(g_status.size() == 1 && g_status[0].find("added " + std::to_string(frames) + " frame(s)") != std::string::npos);
       // All new frames differ from one another and from the start, in both the shades and the colors.
       std::set<std::pair<std::vector<uint8_t>, std::vector<uint16_t>>> seen;
       for (size_t i = 2; i < g_frames.size(); ++i)
@@ -1519,6 +1556,8 @@ void testFramesListMatchesTheMaximum()
    for (const auto& sz : sizes)
       for (const Case& c : allCases())
       {
+         if (c.transition->needsFrame)
+            continue;
          resetProject(sz[0], sz[1], false);
          openMenu();
          change("transition", c.transition->id);
@@ -1533,7 +1572,7 @@ void testFramesListMatchesTheMaximum()
          auto e = makeEffect(c, sz[0], sz[1]);
          // The plugin's own effect sees the real frame, whose colors differ from makeInfo: only
          // the geometry-bound transitions have to agree exactly.
-         if (!isFade(c))
+         if (!isFade(c) && !e->movesPixels())
             CHECK(choiceValues(*f).size() == e->maxSteps());
          CHECK(!choiceValues(*f).empty());
          closeForm(false);
@@ -2348,7 +2387,7 @@ void testVersionAndDescriptions()
    resetProject(128, 32, false);
    openMenu();
    CHECK(g_form.title == std::string("TransitionFX v") + kVersion);
-   CHECK(std::string(kVersion) == "1.00");
+   CHECK(std::string(kVersion) == "1.01");
    // Every transition has a description, shown under the transition choice, with or without options.
    for (const auto& t : transitions::kTransitions)
    {
@@ -2361,11 +2400,393 @@ void testVersionAndDescriptions()
       CHECK(d.find("left at the end") == std::string::npos && d.find("thin ") == std::string::npos);
    }
    CHECK(std::string(transitions::findTransition("alternating_slide")->description) ==
-         "Horizontal: even rows slide left and odd rows slide right (starting at row 0)\n"
-         "Vertical: even columns slide up and odd columns slide down (starting at column 0)");
+         "Horizontal: even rows (0,2,4) slide left and odd rows (1,3,5) slide right\n"
+         "Vertical: even columns (0,2,4) slide up and odd columns (1,3,5) slide down");
    CHECK(std::string(transitions::findTransition("fade")->description) ==
          "The first frame gradually fades to black, white or the second frame.");
    closeForm(false);
+}
+
+// Dust and Morph: the pixels fly, so the generic checks of the other effects do not apply.
+std::vector<size_t> litPixels(const std::vector<uint8_t>& shades, uint8_t darkest)
+{
+   std::vector<size_t> out;
+   for (size_t i = 0; i < shades.size(); ++i)
+      if (shades[i] > darkest)
+         out.push_back(i);
+   return out;
+}
+
+void testDust()
+{
+   const uint32_t w = 128, h = 32;
+   const transitions::SourceInfo info = makeInfo(w, h);
+   for (const char* wind : {"right", "left", "up", "down"})
+   {
+      auto e = makeNamed("dust", wind, w, h);
+      const uint32_t most = e->maxSteps();
+      CHECK(most >= 8 && most <= transitions::kMaxSteps);
+      // The pixels shown are pixels of the frame and no place shows two of them; lit ones go away
+      // from the wind's side, and the last frame still shows something.
+      for (uint32_t step = 1; step <= most; ++step)
+      {
+         size_t shown = 0;
+         for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, step, most);
+               if (!r.visible)
+                  continue;
+               ++shown;
+               CHECK(r.x < w && r.y < h && !r.second && !r.blank);
+            }
+         CHECK(step < most || shown > 0);
+      }
+      // The same every time.
+      auto again = makeNamed("dust", wind, w, h);
+      CHECK(signatureOf(*e, w, h, most / 2, most) == signatureOf(*again, w, h, most / 2, most));
+      // It starts on the side the wind comes from: a third of the way through, more of the lit pixels
+      // nearest to that side have left than of those farthest from it.
+      const uint32_t step = std::max(1u, most / 3);
+      std::vector<std::pair<double, int>> lit; // (how far along the wind, has left)
+      for (uint32_t y = 0; y < h; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            if (info.shades[static_cast<size_t>(y) * w + x] <= 1)
+               continue;
+            const double u = std::string(wind) == "right" ? double(x) / w : std::string(wind) == "left" ? 1.0 - double(x) / w
+                             : std::string(wind) == "down" ? double(y) / h : 1.0 - double(y) / h;
+            const transitions::Rule r = e->rule(x, y, step, most);
+            lit.push_back({u, (r.visible && r.x == x && r.y == y) ? 0 : 1});
+         }
+      std::sort(lit.begin(), lit.end());
+      long near = 0, far = 0;
+      for (size_t k = 0; k < lit.size() / 4; ++k)
+      {
+         near += lit[k].second;
+         far += lit[lit.size() - 1 - k].second;
+      }
+      CHECK(near > far);
+   }
+   // Nothing lit, nothing to do.
+   transitions::SourceInfo empty = makeInfo(w, h);
+   empty.shades.assign(static_cast<size_t>(w) * h, 2);
+   CHECK(transitions::findTransition("dust")->make("right", empty)->maxSteps() == 0);
+   // With another frame underneath, what the wind has cleared shows it (invisible, not blank).
+   auto e = makeNamed("dust", "right", w, h, true);
+   bool cleared = false;
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+         cleared = cleared || (!e->rule(x, y, e->maxSteps(), e->maxSteps()).visible && !e->rule(x, y, e->maxSteps(), e->maxSteps()).blank);
+   CHECK(cleared);
+}
+
+void testMorph()
+{
+   const uint32_t w = 128, h = 32;
+   const transitions::SourceInfo info = makeInfo(w, h);
+   const auto litA = litPixels(info.shades, 1);
+   const auto litB = litPixels(info.shadesSecond, 1);
+   CHECK(!litA.empty() && !litB.empty());
+   // Not to another frame: nothing to do.
+   CHECK(makeNamed("morph", "random", w, h, false)->maxSteps() == 0);
+   for (const char* order : {"random", "right", "left", "down", "up"})
+   {
+      auto e = makeNamed("morph", order, w, h, true);
+      const uint32_t most = e->maxSteps();
+      CHECK(most >= 8);
+      // The last frame is the other frame's lit pixels (taken from it), the rest black.
+      std::vector<bool> lit(static_cast<size_t>(w) * h, false);
+      for (size_t i : litB)
+         lit[i] = true;
+      for (uint32_t y = 0; y < h; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const transitions::Rule r = e->rule(x, y, most, most);
+            const size_t i = static_cast<size_t>(y) * w + x;
+            if (lit[i])
+               CHECK(r.visible && r.second && r.x == x && r.y == y);
+            else
+               CHECK(r.visible && r.second && r.x == x && r.y == y); // the other frame's own background
+         }
+      // On the way, nothing else is lit than the pixels travelling, and the count of travellers
+      // never exceeds what there is; the places without a pixel show the background.
+      for (uint32_t step = 1; step < most; ++step)
+      {
+         size_t shown = 0;
+         for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, step, most);
+               CHECK(r.visible);
+               const size_t at = static_cast<size_t>(r.y) * w + r.x;
+               // A traveller is a lit pixel of its frame; the rest is background.
+               shown += (r.second ? info.shadesSecond[at] : info.shades[at]) > 1 ? 1 : 0;
+            }
+         CHECK(shown > 0 && shown <= std::max(litA.size(), litB.size()));
+      }
+      auto again = makeNamed("morph", order, w, h, true);
+      CHECK(signatureOf(*e, w, h, most / 2, most) == signatureOf(*again, w, h, most / 2, most));
+   }
+   // Places without a pixel show the background, never black: where the frame has background, its own
+   // pixel (the first frame's before the halfway point, the other frame's after it); where it has a
+   // pixel, the background of the other frame if that has background there (the sky behind the cow
+   // stays), else the nearest background pixel of the row.
+   {
+      auto e = makeNamed("morph", "random", w, h, true);
+      const uint32_t most = e->maxSteps();
+      size_t behind = 0;
+      for (uint32_t step : {1u, most / 4, most / 2, most - 1})
+         for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, step, most);
+               CHECK(r.visible); // no black
+               const size_t cell = static_cast<size_t>(y) * w + x, at = static_cast<size_t>(r.y) * w + r.x;
+               const bool lit = (r.second ? info.shadesSecond[at] : info.shades[at]) > 1;
+               // A pixel of the picture is a traveller (somewhere else) or sits at its own place.
+               if (lit)
+                  continue;
+               // Background: a vacated place of the first frame shows the other frame's background there.
+               if (info.shades[cell] > 1 && info.shadesSecond[cell] <= 1 && r.second && r.x == x && r.y == y)
+                  ++behind;
+            }
+      CHECK(behind > 0);
+   }
+   // Colors pair with colors, and what both frames share stays. Frame one: color 100 on the left, 200
+   // on the right; frame two: 200 on the left, 100 on the right; in the middle a block that is the
+   // same in both (color 50).
+   {
+      transitions::SourceInfo c = makeInfo(w, h);
+      c.toFrame = true;
+      const size_t cells = static_cast<size_t>(w) * h;
+      c.shades.assign(cells, 1);
+      c.shadesSecond.assign(cells, 1);
+      c.tones.assign(cells, 0);
+      c.tonesSecond.assign(cells, 0);
+      c.same.assign(cells, 0);
+      for (uint32_t y = 8; y < 24; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const size_t i = static_cast<size_t>(y) * w + x;
+            if (x >= 10 && x < 50)
+            {
+               c.shades[i] = 2;
+               c.tones[i] = 100;
+               c.shadesSecond[i] = 3;
+               c.tonesSecond[i] = 200;
+            }
+            else if (x >= 78 && x < 118)
+            {
+               c.shades[i] = 3;
+               c.tones[i] = 200;
+               c.shadesSecond[i] = 2;
+               c.tonesSecond[i] = 100;
+            }
+            else if (x >= 60 && x < 68)
+            {
+               c.shades[i] = c.shadesSecond[i] = 2;
+               c.tones[i] = c.tonesSecond[i] = 50;
+               c.same[i] = 1;
+            }
+         }
+      auto e = transitions::findTransition("morph")->make("random", c);
+      const uint32_t most = e->maxSteps();
+      CHECK(most >= 8);
+      // The color of the left block travels to the right block, where the same color is.
+      const uint32_t step = most / 3;
+      double travelled = 0;
+      size_t count = 0;
+      for (uint32_t y = 0; y < h; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const transitions::Rule r = e->rule(x, y, step, most);
+            if (r.visible && !r.second && r.x >= 10 && r.x < 50 && r.y >= 8 && r.y < 24 && r.x != x)
+            {
+               travelled += double(x) - r.x;
+               ++count;
+            }
+         }
+      CHECK(count > 0 && travelled / count > 10);
+      // The shared block stays where it is, at every step, and nothing else takes its places at the end.
+      for (uint32_t st = 1; st <= most; ++st)
+      {
+         size_t staying = 0;
+         for (uint32_t y = 8; y < 24; ++y)
+            for (uint32_t x = 60; x < 68; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, st, most);
+               staying += (r.visible && r.x == x && r.y == y) ? 1 : 0;
+            }
+         CHECK(st == most ? staying == 16 * 8 : staying > 0);
+      }
+   }
+   // Two frames that are alike (the same shape, a pixel or two apart, other shades): little moves,
+   // but the colors change one after the other, so there are still many frames.
+   {
+      transitions::SourceInfo alike = makeInfo(w, h);
+      alike.toFrame = true;
+      alike.shadesSecond.assign(static_cast<size_t>(w) * h, 1);
+      for (size_t i = 0; i + 1 < alike.shades.size(); ++i)
+         if (alike.shades[i] > 1)
+            alike.shadesSecond[i + 1] = static_cast<uint8_t>(alike.shades[i] == 3 ? 2 : 3);
+      for (const char* order : {"random", "right", "up"})
+         CHECK(transitions::findTransition("morph")->make(order, alike)->maxSteps() >= 24);
+   }
+   // Two pictures of different sizes of lit area: every lit pixel of the larger one is used.
+   transitions::SourceInfo odd = makeInfo(129, 33);
+   odd.toFrame = true;
+   CHECK(transitions::findTransition("morph")->make("random", odd)->maxSteps() >= 4);
+}
+
+void testMorphThroughTheWindow()
+{
+   for (bool zones : {false, true})
+   {
+      resetProject(128, 32, zones);
+      g_frames[1] = makeSecondFrame(zones);
+      // Like a real colorization: a dark red background where the original is darkest, except that the author has
+      // colored in rows that the original leaves black (green pixels in the top 8 rows of frame 0).
+      for (Frame* f : {&g_frames[0], &g_frames[1]})
+         for (size_t p = 0; p < f->original.size(); ++p)
+            if (f->original[p] == 1)
+               f->sd[p] = 0x2000;
+      for (uint32_t y = 0; y < 8; ++y)
+         for (uint32_t x = 0; x < 128; x += 2)
+            g_frames[0].sd[static_cast<size_t>(y) * 128 + x] = 0x07E0;
+      if (zones)
+         for (Frame* f : {&g_frames[0], &g_frames[1]})
+            std::fill(f->zones.begin(), f->zones.end(), 255);
+      const Frame start = g_frames[0];
+      selectTwo(0, 1);
+      openMenu();
+      // Without another frame the window says so.
+      change("transition", "morph");
+      CHECK(fieldOf("frames")->choices.find("0=None") == 0);
+      change("target", "frame");
+      CHECK(fieldOf("frames")->choices.find("0=None") != 0);
+      change("option", "right");
+      change("frames", "3");
+      change("placement", "end");
+      closeForm(true);
+      CHECK(g_frames.size() == 5);
+      if (g_frames.size() != 5)
+         continue;
+      const Frame& b = g_frames[1];
+      const Frame& last = g_frames[4];
+      for (size_t p = 0; p < last.original.size(); ++p)
+      {
+         if (b.original[p] > 1)
+            CHECK(last.original[p] == b.original[p] && last.sd[p] == b.sd[p]);
+         else
+            CHECK(last.original[p] <= 1 && last.sd[p] == 0x2000); // the background stays, not black
+      }
+      // On the way the background stays between the pixels, and the starting frame is not changed.
+      const Frame& mid = g_frames[3];
+      CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0x2000) > static_cast<long>(mid.sd.size() / 3));
+      CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0) == 0);
+      CHECK(g_frames[0].original == start.original && g_frames[0].sd == start.sd);
+      // The colored-in pixels that the original leaves black take part: the first new frame still
+      // has green ones, and they are not left behind in the top rows of the last frame.
+      auto green = [](const Frame& f, bool topOnly) {
+         size_t n = 0;
+         for (size_t p = 0; p < f.sd.size() && (!topOnly || p < 8 * 128); ++p)
+            n += f.sd[p] == 0x07E0 ? 1 : 0;
+         return n;
+      };
+      CHECK(green(g_frames[2], false) > 0);
+      CHECK(green(last, false) == 0);
+   }
+}
+
+// The window in the author's language: German and French follow the editor's language; an unknown
+// language, or an editor that cannot tell, gives English.
+void testLanguages()
+{
+   struct Language
+   {
+      const char* code;
+      const char* transitionLabel;
+      const char* black;
+   };
+   const Language languages[] = {{"en", "Transition", "Black"},
+                                 {"de", "Übergang", "Schwarz"},
+                                 {"fr", "Transition", "Noir"},
+                                 {"xx", "Transition", "Black"},
+                                 {"", "Transition", "Black"}};
+   for (const Language& l : languages)
+   {
+      const std::string code = l.code;
+      g_language = code;
+      TransitionFXPluginUnload();
+      setUpApi();
+      TransitionFXPluginLoad(1, &g_bus);
+      resetProject(128, 32, false);
+      openMenu();
+      const Form::Field* t = fieldOf("transition");
+      CHECK(t && t->label == l.transitionLabel);
+      const Form::Field* target = fieldOf("target");
+      CHECK(target && target->choices.find(std::string("black=") + l.black) != std::string::npos);
+      if (t && code == "de")
+         CHECK(t->choices.find("alternating_slide=Wechselnde Verschiebung") != std::string::npos);
+      if (t && code == "fr")
+         CHECK(t->choices.find("dust=Poussière") != std::string::npos);
+      // The description under the transition and the status bar follow.
+      change("transition", "fade");
+      const Form::Field* f = fieldOf("transition");
+      if (f && code == "de")
+         CHECK(f->help.find("überblendet") != std::string::npos);
+      if (f && code == "fr")
+         CHECK(f->help.find("progressivement") != std::string::npos);
+      if (f && (code == "en" || code == "xx" || code.empty()))
+         CHECK(f->help.find("gradually fades") != std::string::npos);
+      change("frames", "3");
+      closeForm(true);
+      CHECK(g_status.size() == 1);
+      if (!g_status.empty())
+      {
+         if (code == "de")
+            CHECK(g_status[0].find("hinzugefügt") != std::string::npos && g_status[0].find("Rückgängig") != std::string::npos);
+         else if (code == "fr")
+            CHECK(g_status[0].find("ajoutée(s)") != std::string::npos);
+         else
+            CHECK(g_status[0].find("added 3 frame(s)") != std::string::npos);
+         CHECK(g_status[0].find('%') == std::string::npos); // no placeholder is left over
+      }
+   }
+   // An editor before version 11 has no language: English.
+   g_language = "de";
+   TransitionFXPluginUnload();
+   setUpApi();
+   g_api.version = 10;
+   TransitionFXPluginLoad(1, &g_bus);
+   resetProject(128, 32, false);
+   openMenu();
+   CHECK(fieldOf("transition") && fieldOf("transition")->label == "Transition");
+   g_language = "en";
+   TransitionFXPluginUnload();
+   setUpApi();
+   TransitionFXPluginLoad(1, &g_bus);
+
+   // Every text of every transition has a German and a French translation.
+   auto translated = [](const char* text) {
+      const i18n::Entry* e = i18n::find(text);
+      return e && e->german && *e->german && e->french && *e->french;
+   };
+   for (const transitions::Transition& tr : transitions::kTransitions)
+   {
+      CHECK(translated(tr.label));
+      CHECK(translated(tr.description));
+      CHECK(!tr.optionLabel || translated(tr.optionLabel));
+      // A description is a sentence: it differs in another language.
+      const i18n::Entry* d = i18n::find(tr.description);
+      CHECK(d && std::string(d->german) != tr.description && std::string(d->french) != tr.description);
+      for (size_t i = 0; i < tr.optionCount; ++i)
+         CHECK(std::string(tr.options[i].label).find(" x ") != std::string::npos || translated(tr.options[i].label));
+   }
+   // And the reason that limits the frames of every transition.
+   for (const Case& c : allCases())
+      CHECK(translated(makeEffect(c, 128, 32)->limitReason()));
 }
 
 void testSecondMovesWindow()
@@ -2625,7 +3046,11 @@ int main()
    testWave();
    testMelt();
    testSecondMoves();
+   testDust();
+   testMorph();
+   testMorphThroughTheWindow();
    testSecondMovesWindow();
+   testLanguages();
    testVersionAndDescriptions();
    testCheckerboard();
    testGoingThroughBothFrames();

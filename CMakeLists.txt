@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # On Windows the plugin carries its runtime inside, so nothing else has to be installed.
 if(MSVC)
+  # The sources are UTF-8 (the German and French texts have umlauts and accents).
+  add_compile_options(/utf-8)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
