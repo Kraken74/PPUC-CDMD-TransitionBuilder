@@ -350,6 +350,42 @@ std::vector<uint8_t> movingShades(const Source& source, uint32_t& background)
    return shades;
 }
 
+// The color of every place of the original frame, as the colorized picture shows it (one value
+// each, for comparing); empty when there is no colorized picture.
+std::vector<uint16_t> tonesOf(const Source& source)
+{
+   std::vector<uint16_t> tones;
+   const uint32_t w = source.originalWidth, h = source.originalHeight;
+   if (source.planes.empty() || source.original.size() != static_cast<size_t>(w) * h)
+      return tones;
+   const Plane& plane = source.planes[0];
+   if (plane.width == 0 || plane.height == 0 || plane.pixels.size() != static_cast<size_t>(plane.width) * plane.height)
+      return tones;
+   tones.resize(static_cast<size_t>(w) * h);
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+      {
+         const size_t px = static_cast<size_t>(x) * plane.width / w, py = static_cast<size_t>(y) * plane.height / h;
+         tones[static_cast<size_t>(y) * w + x] = plane.pixels[py * plane.width + px];
+      }
+   return tones;
+}
+
+// The places that look the same in both frames: the same shade and the same color (and the same
+// dynamic zone). Empty when the frames cannot be compared place by place.
+std::vector<uint8_t> sameOf(const Source& a, const Source& b, const std::vector<uint16_t>& tonesA,
+                            const std::vector<uint16_t>& tonesB)
+{
+   const size_t cells = static_cast<size_t>(a.originalWidth) * a.originalHeight;
+   if (a.originalWidth != b.originalWidth || a.originalHeight != b.originalHeight || a.original.size() != cells ||
+       b.original.size() != cells || tonesA.size() != tonesB.size())
+      return {};
+   std::vector<uint8_t> same(cells, 0);
+   for (size_t i = 0; i < cells; ++i)
+      same[i] = a.original[i] == b.original[i] && (tonesA.empty() || tonesA[i] == tonesB[i]) ? 1 : 0;
+   return same;
+}
+
 transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const Source* second = nullptr)
 {
    transitions::SourceInfo info;
@@ -363,8 +399,13 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
    info.shades = movingShades(source, info.background);
+   info.tones = tonesOf(source);
    if (second)
+   {
       info.shadesSecond = movingShades(*second, info.backgroundSecond);
+      info.tonesSecond = tonesOf(*second);
+      info.same = sameOf(source, *second, info.tones, info.tonesSecond);
+   }
    if (!source.original.empty())
    {
       info.brightestShade = *std::max_element(source.original.begin(), source.original.end());

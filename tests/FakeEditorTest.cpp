@@ -2544,6 +2544,86 @@ void testMorph()
       CHECK(early.visible && !early.second && early.x == 0 && early.y == 0);
       CHECK(late.visible && late.second && late.x == 5 && late.y == 0);
    }
+   // Colors pair with colors, and what both frames share stays. Frame one: color 100 on the left, 200
+   // on the right; frame two: 200 on the left, 100 on the right; in the middle a block that is the
+   // same in both (color 50).
+   {
+      transitions::SourceInfo c = makeInfo(w, h);
+      c.toFrame = true;
+      const size_t cells = static_cast<size_t>(w) * h;
+      c.shades.assign(cells, 1);
+      c.shadesSecond.assign(cells, 1);
+      c.tones.assign(cells, 0);
+      c.tonesSecond.assign(cells, 0);
+      c.same.assign(cells, 0);
+      for (uint32_t y = 8; y < 24; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const size_t i = static_cast<size_t>(y) * w + x;
+            if (x >= 10 && x < 50)
+            {
+               c.shades[i] = 2;
+               c.tones[i] = 100;
+               c.shadesSecond[i] = 3;
+               c.tonesSecond[i] = 200;
+            }
+            else if (x >= 78 && x < 118)
+            {
+               c.shades[i] = 3;
+               c.tones[i] = 200;
+               c.shadesSecond[i] = 2;
+               c.tonesSecond[i] = 100;
+            }
+            else if (x >= 60 && x < 68)
+            {
+               c.shades[i] = c.shadesSecond[i] = 2;
+               c.tones[i] = c.tonesSecond[i] = 50;
+               c.same[i] = 1;
+            }
+         }
+      auto e = transitions::findTransition("morph")->make("random", c);
+      const uint32_t most = e->maxSteps();
+      CHECK(most >= 8);
+      // The color of the left block travels to the right block, where the same color is.
+      const uint32_t step = most / 3;
+      double travelled = 0;
+      size_t count = 0;
+      for (uint32_t y = 0; y < h; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const transitions::Rule r = e->rule(x, y, step, most);
+            if (r.visible && !r.second && r.x >= 10 && r.x < 50)
+            {
+               travelled += double(x) - r.x;
+               ++count;
+            }
+         }
+      CHECK(count > 0 && travelled / count > 10);
+      // The shared block stays where it is, at every step, and nothing else takes its places at the end.
+      for (uint32_t st = 1; st <= most; ++st)
+      {
+         size_t staying = 0;
+         for (uint32_t y = 8; y < 24; ++y)
+            for (uint32_t x = 60; x < 68; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, st, most);
+               staying += (r.visible && r.x == x && r.y == y) ? 1 : 0;
+            }
+         CHECK(st == most ? staying == 16 * 8 : staying > 0);
+      }
+   }
+   // Two frames that are alike (the same shape, a pixel or two apart, other shades): little moves,
+   // but the colors change one after the other, so there are still many frames.
+   {
+      transitions::SourceInfo alike = makeInfo(w, h);
+      alike.toFrame = true;
+      alike.shadesSecond.assign(static_cast<size_t>(w) * h, 1);
+      for (size_t i = 0; i + 1 < alike.shades.size(); ++i)
+         if (alike.shades[i] > 1)
+            alike.shadesSecond[i + 1] = static_cast<uint8_t>(alike.shades[i] == 3 ? 2 : 3);
+      for (const char* order : {"random", "right", "up"})
+         CHECK(transitions::findTransition("morph")->make(order, alike)->maxSteps() >= 24);
+   }
    // Two pictures of different sizes of lit area: every lit pixel of the larger one is used.
    transitions::SourceInfo odd = makeInfo(129, 33);
    odd.toFrame = true;

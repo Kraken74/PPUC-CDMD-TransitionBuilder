@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <string_view>
@@ -65,6 +66,11 @@ struct SourceInfo
    // leaves the background where it is instead of making it black.
    uint32_t background = UINT32_MAX;
    uint32_t backgroundSecond = UINT32_MAX;
+   // The colors of the places (one value each; what Morph pairs pixels by: white goes to white),
+   // and which places are the same in both frames (1: same shade, same color), so that they stay.
+   // Any of them may be empty (nothing is known: the shades are the colors, nothing is the same).
+   std::vector<uint16_t> tones, tonesSecond;
+   std::vector<uint8_t> same;
    uint32_t crossSpan = 0;        // toFrame: the largest color difference between the two frames, in
                                   // units of a 5-bit channel (what a cross-fade needs to know)
 };
@@ -1185,25 +1191,65 @@ private:
 class Morph final : public PixelEffect
 {
 public:
-   // `sweep` false: random moments.
-   Morph(bool sweep, Direction direction, const std::vector<uint8_t>& from, const std::vector<uint8_t>& to,
-         uint32_t width, uint32_t height, uint32_t backgroundFrom = UINT32_MAX, uint32_t backgroundTo = UINT32_MAX)
-      : PixelEffect(width, height), m_from(from), m_to(to), m_backgroundFrom(backgroundFrom), m_backgroundTo(backgroundTo)
+   // `sweep` false: random moments. Without the other frame (shades empty) there is nothing to do.
+   Morph(bool sweep, Direction direction, const SourceInfo& s)
+      : PixelEffect(s.width, s.height), m_from(s.shades), m_to(s.shadesSecond), m_backgroundFrom(s.background),
+        m_backgroundTo(s.backgroundSecond)
    {
-      std::vector<uint32_t> a = litPlaces(from, width, height);
-      std::vector<uint32_t> b = litPlaces(to, width, height);
+      const uint32_t width = s.width, height = s.height;
+      const size_t cells = static_cast<size_t>(width) * height;
+      std::vector<uint32_t> a = litPlaces(m_from, width, height);
+      std::vector<uint32_t> b = litPlaces(m_to, width, height);
       if (a.empty() || b.empty())
          return;
-      // As many partners on both sides: the smaller picture's pixels are used more than once.
-      const size_t count = std::max(a.size(), b.size());
+      // What is the same in both frames stays where it is; the moving pixels pass in front of it.
+      m_static.assign(cells, 0);
+      if (s.same.size() == cells)
+      {
+         const uint8_t darkest = *std::min_element(m_from.begin(), m_from.end());
+         for (size_t i = 0; i < cells; ++i)
+            m_static[i] = s.same[i] && m_from[i] > darkest ? 1 : 0;
+         auto moving = [&](uint32_t i) { return !m_static[i]; };
+         a.erase(std::remove_if(a.begin(), a.end(), [&](uint32_t i) { return !moving(i); }), a.end());
+         b.erase(std::remove_if(b.begin(), b.end(), [&](uint32_t i) { return !moving(i); }), b.end());
+         if (a.empty() || b.empty())
+            return;
+      }
+      // Pixels go to pixels of the same color: white to white (and there are more of them if the other
+      // picture has more white). Colors only one frame has, and what is left, are paired by place.
+      auto tone = [&](const std::vector<uint16_t>& tones, const std::vector<uint8_t>& shades, uint32_t i) {
+         return tones.size() == cells ? tones[i] : static_cast<uint16_t>(shades[i]);
+      };
+      std::map<uint16_t, std::pair<std::vector<uint32_t>, std::vector<uint32_t>>> groups;
+      for (uint32_t i : a)
+         groups[tone(s.tones, m_from, i)].first.push_back(i);
+      for (uint32_t i : b)
+         groups[tone(s.tonesSecond, m_to, i)].second.push_back(i);
+      std::vector<Pair> pairs;
+      std::vector<uint32_t> restA, restB;
+      for (const auto& g : groups)
+      {
+         if (!g.second.first.empty() && !g.second.second.empty())
+            match(g.second.first, g.second.second, width, pairs);
+         else
+         {
+            restA.insert(restA.end(), g.second.first.begin(), g.second.first.end());
+            restB.insert(restB.end(), g.second.second.begin(), g.second.second.end());
+         }
+      }
+      if (!restA.empty() && !restB.empty())
+         match(restA, restB, width, pairs);
+      else if (!restA.empty())
+         match(restA, spread(b, restA.size()), width, pairs);
+      else if (!restB.empty())
+         match(spread(a, restB.size()), restB, width, pairs);
+      const size_t count = pairs.size();
       std::vector<Pt> pa(count), pb(count);
       for (size_t i = 0; i < count; ++i)
       {
-         const uint32_t ia = a[i * a.size() / count], ib = b[i * b.size() / count];
-         pa[i] = {ia % width, ia / width};
-         pb[i] = {ib % width, ib / width};
+         pa[i] = pairs[i].from;
+         pb[i] = pairs[i].to;
       }
-      pair(pa, pb, 0, count);
       m_parts.resize(count);
       for (size_t i = 0; i < count; ++i)
       {
@@ -1229,10 +1275,41 @@ public:
       for (const Part& p : m_parts)
          first = std::min(first, p.delay);
       for (Part& p : m_parts)
-      {
          p.delay -= first;
-         m_end = std::max(m_end, p.delay + p.span);
+      // The time runs from the first change anyone makes (a pixel moves a whole pixel, or changes its
+      // color) to the last one, so that pictures that are alike (little to move, only colors to
+      // change) still have a different picture at every step.
+      m_first = 1e9;
+      m_end = 0;
+      for (const Part& p : m_parts)
+      {
+         const double distance = std::max(std::abs(static_cast<double>(p.dx) - p.sx), std::abs(static_cast<double>(p.dy) - p.sy));
+         const double flip = p.delay + 0.5 * p.span;
+         m_first = std::min(m_first, flip);
+         m_end = std::max(m_end, flip);
+         if (distance >= 1.0)
+         {
+            // The local times at which it has moved half a pixel, and at which it is within half a
+            // pixel of the end (the eased progress only grows).
+            double low = 0, high = 1;
+            for (int i = 0; i < 40; ++i)
+            {
+               const double mid = 0.5 * (low + high);
+               (progress(mid) * distance >= 0.5 ? high : low) = mid;
+            }
+            m_first = std::min(m_first, p.delay + p.span * high);
+            low = 0;
+            high = 1;
+            for (int i = 0; i < 40; ++i)
+            {
+               const double mid = 0.5 * (low + high);
+               ((1.0 - progress(mid)) * distance < 0.5 ? high : low) = mid;
+            }
+            m_end = std::max(m_end, p.delay + p.span * high);
+         }
       }
+      if (m_end <= m_first)
+         m_end = m_first + 0.01;
    }
    const char* limitReason() const override
    {
@@ -1254,14 +1331,18 @@ protected:
       for (Rule& r : cells)
          r = empty;
       std::vector<int> rank(cells.size(), -1);
+      for (size_t i = 0; i < m_static.size() && i < cells.size(); ++i)
+         if (m_static[i])
+         {
+            cells[i] = Rule{true, static_cast<uint32_t>(i % m_width), static_cast<uint32_t>(i / m_width)};
+            rank[i] = 0; // the pixels on their way pass in front
+         }
       const double t = static_cast<double>(step) / steps;
       for (const Part& p : m_parts)
       {
          // The time runs until the last pixel has arrived, so that the last frame is the picture.
-         double local = std::min(1.0, std::max(0.0, (t * m_end - p.delay) / p.span));
-         double e = 1.0;
-         if (local < 1.0)
-            e = 0.5 * (local + local * local * (3.0 - 2.0 * local));
+         const double local = std::min(1.0, std::max(0.0, (m_first + (m_end - m_first) * t - p.delay) / p.span));
+         const double e = progress(local);
          const int32_t px = rounded(p.sx + (static_cast<double>(p.dx) - p.sx) * e);
          const int32_t py = rounded(p.sy + (static_cast<double>(p.dy) - p.sy) * e);
          const bool arrived = local >= 0.5; // the pixel has its new color from the halfway point
@@ -1289,6 +1370,40 @@ private:
    };
    // Pairs a[lo, hi) with b[lo, hi) (equally long): cut both along the longer side of the box that
    // holds them, in the middle, and pair the halves. In the end the pixel i of a goes to pixel i of b.
+   struct Pair
+   {
+      Pt from, to;
+   };
+   // `count` of the places, taken evenly (some more than once if there are fewer).
+   static std::vector<uint32_t> spread(const std::vector<uint32_t>& places, size_t count)
+   {
+      std::vector<uint32_t> out(count);
+      for (size_t i = 0; i < count; ++i)
+         out[i] = places[i * places.size() / count];
+      return out;
+   }
+   // Pairs two sets of places (row * width + column) so that the pixels hardly cross: as many pairs
+   // as the larger set has pixels, so the smaller set's pixels are used more than once.
+   static void match(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b, uint32_t width,
+                     std::vector<Pair>& out)
+   {
+      const size_t count = std::max(a.size(), b.size());
+      std::vector<Pt> pa(count), pb(count);
+      for (size_t i = 0; i < count; ++i)
+      {
+         const uint32_t ia = a[i * a.size() / count], ib = b[i * b.size() / count];
+         pa[i] = {ia % width, ia / width};
+         pb[i] = {ib % width, ib / width};
+      }
+      pair(pa, pb, 0, count);
+      for (size_t i = 0; i < count; ++i)
+         out.push_back({pa[i], pb[i]});
+   }
+   // How far a pixel is on its way (0 .. 1) at a local time (0 .. 1): slow at the start and the end.
+   static double progress(double local)
+   {
+      return local >= 1.0 ? 1.0 : 0.5 * (local + local * local * (3.0 - 2.0 * local));
+   }
    static void pair(std::vector<Pt>& a, std::vector<Pt>& b, size_t lo, size_t hi)
    {
       if (hi - lo < 2)
@@ -1315,7 +1430,8 @@ private:
 
    std::vector<uint8_t> m_from, m_to;
    uint32_t m_backgroundFrom, m_backgroundTo;
-   double m_end = 0;
+   std::vector<uint8_t> m_static; // places that are the same in both frames and stay
+   double m_first = 0, m_end = 0;
    std::vector<Part> m_parts;
 };
 
@@ -1432,9 +1548,13 @@ inline std::unique_ptr<Effect> makeMorph(const char* option, const SourceInfo& s
    const Direction d = same(option, "left") ? Direction::Left : same(option, "up") ? Direction::Up
                        : same(option, "down") ? Direction::Down : Direction::Right;
    if (!s.toFrame)
-      return std::make_unique<Morph>(sweep, d, std::vector<uint8_t>(), std::vector<uint8_t>(), s.width, s.height);
-   return std::make_unique<Morph>(sweep, d, s.shades, s.shadesSecond, s.width, s.height, s.background,
-                                  s.backgroundSecond);
+   {
+      SourceInfo nothing;
+      nothing.width = s.width;
+      nothing.height = s.height;
+      return std::make_unique<Morph>(sweep, d, nothing);
+   }
+   return std::make_unique<Morph>(sweep, d, s);
 }
 
 inline const Option kDissolveOptions[] = {
