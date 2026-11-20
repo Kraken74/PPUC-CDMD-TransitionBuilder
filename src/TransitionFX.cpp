@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -299,7 +300,8 @@ uint32_t crossSpanOf(const Source& a, const Source& b)
 // color most pixels have): an author can color in rows the original leaves black, and those
 // pixels move too, while a colored background stays where it is. `background` is set to a place
 // that shows the background (UINT32_MAX: none, every place has something on it).
-std::vector<uint8_t> movingShades(const Source& source, uint32_t& background)
+std::vector<uint8_t> movingShades(const Source& source, uint32_t& background,
+                                  const std::set<uint16_t>& backgroundColors = {})
 {
    background = UINT32_MAX;
    std::vector<uint8_t> shades = source.original;
@@ -334,7 +336,8 @@ std::vector<uint8_t> movingShades(const Source& source, uint32_t& background)
          {
             const size_t px = static_cast<size_t>(x) * plane->width / w;
             const size_t py = static_cast<size_t>(y) * plane->height / h;
-            shown = plane->pixels[py * plane->width + px] != backgroundColor;
+            const uint16_t color = plane->pixels[py * plane->width + px];
+            shown = color != backgroundColor && !backgroundColors.count(color);
          }
          if (!shown && zones)
          {
@@ -398,14 +401,26 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
-   info.shades = movingShades(source, info.background);
    info.tones = tonesOf(source);
    if (second)
    {
-      info.shadesSecond = movingShades(*second, info.backgroundSecond);
       info.tonesSecond = tonesOf(*second);
       info.same = sameOf(source, *second, info.tones, info.tonesSecond);
+      // The colors of the places that are the same in both frames and dark in the original are the
+      // background (a sky with dithering has several): they are not pixels to move elsewhere.
+      std::set<uint16_t> background;
+      if (info.same.size() == info.tones.size() && info.tones.size() == source.original.size() && !source.original.empty())
+      {
+         const uint8_t darkest = *std::min_element(source.original.begin(), source.original.end());
+         for (size_t i = 0; i < info.same.size(); ++i)
+            if (info.same[i] && source.original[i] <= darkest)
+               background.insert(info.tones[i]);
+      }
+      info.shades = movingShades(source, info.background, background);
+      info.shadesSecond = movingShades(*second, info.backgroundSecond, background);
    }
+   else
+      info.shades = movingShades(source, info.background);
    if (!source.original.empty())
    {
       info.brightestShade = *std::max_element(source.original.begin(), source.original.end());

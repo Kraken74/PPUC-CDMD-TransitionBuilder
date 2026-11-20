@@ -1191,6 +1191,38 @@ private:
 class Morph final : public PixelEffect
 {
 public:
+   // What a place shows when no pixel is on it: its own pixel if the frame has only background
+   // there, else the nearest background pixel in its row (or column, or the frame's background
+   // place); UINT32_MAX if there is none: black.
+   std::vector<uint32_t> fillOf(const std::vector<uint8_t>& shades, uint32_t backgroundPlace) const
+   {
+      std::vector<uint32_t> fill(shades.size(), UINT32_MAX);
+      if (shades.size() != static_cast<size_t>(m_width) * m_height || shades.empty())
+         return fill;
+      const uint8_t darkest = *std::min_element(shades.begin(), shades.end());
+      auto unlit = [&](int64_t x, int64_t y) { return shades[static_cast<size_t>(y) * m_width + x] <= darkest; };
+      for (int64_t y = 0; y < m_height; ++y)
+         for (int64_t x = 0; x < m_width; ++x)
+         {
+            uint32_t found = UINT32_MAX;
+            if (unlit(x, y))
+               found = static_cast<uint32_t>(y * m_width + x);
+            for (int64_t d = 1; d < std::max<int64_t>(m_width, m_height) && found == UINT32_MAX; ++d)
+            {
+               if (x - d >= 0 && unlit(x - d, y))
+                  found = static_cast<uint32_t>(y * m_width + x - d);
+               else if (x + d < m_width && unlit(x + d, y))
+                  found = static_cast<uint32_t>(y * m_width + x + d);
+               else if (y - d >= 0 && unlit(x, y - d))
+                  found = static_cast<uint32_t>((y - d) * m_width + x);
+               else if (y + d < m_height && unlit(x, y + d))
+                  found = static_cast<uint32_t>((y + d) * m_width + x);
+            }
+            fill[static_cast<size_t>(y) * m_width + x] = found != UINT32_MAX ? found : backgroundPlace;
+         }
+      return fill;
+   }
+
    // `sweep` false: random moments. Without the other frame (shades empty) there is nothing to do.
    Morph(bool sweep, Direction direction, const SourceInfo& s)
       : PixelEffect(s.width, s.height), m_from(s.shades), m_to(s.shadesSecond), m_backgroundFrom(s.background),
@@ -1198,6 +1230,8 @@ public:
    {
       const uint32_t width = s.width, height = s.height;
       const size_t cells = static_cast<size_t>(width) * height;
+      m_fillFrom = fillOf(m_from, m_backgroundFrom);
+      m_fillTo = fillOf(m_to, m_backgroundTo);
       std::vector<uint32_t> a = litPlaces(m_from, width, height);
       std::vector<uint32_t> b = litPlaces(m_to, width, height);
       if (a.empty() || b.empty())
@@ -1324,12 +1358,13 @@ protected:
       // What a place shows when no pixel is on it: the background of the first frame, and from the
       // halfway point that of the other one; black when a frame has no background.
       const bool late = 2 * step >= steps;
-      const uint32_t bg = late ? m_backgroundTo : m_backgroundFrom;
-      Rule empty{false, 0, 0, false, true}; // black, whatever the other frame shows
-      if (bg != UINT32_MAX && bg < cells.size())
-         empty = Rule{true, bg % m_width, bg / m_width, late};
-      for (Rule& r : cells)
-         r = empty;
+      const std::vector<uint32_t>& fill = late ? m_fillTo : m_fillFrom;
+      for (size_t i = 0; i < cells.size(); ++i)
+      {
+         const uint32_t f = i < fill.size() ? fill[i] : UINT32_MAX;
+         cells[i] = f == UINT32_MAX ? Rule{false, 0, 0, false, true} // black, whatever the other frame shows
+                                     : Rule{true, f % m_width, f / m_width, late};
+      }
       std::vector<int> rank(cells.size(), -1);
       for (size_t i = 0; i < m_static.size() && i < cells.size(); ++i)
          if (m_static[i])
@@ -1431,6 +1466,7 @@ private:
    std::vector<uint8_t> m_from, m_to;
    uint32_t m_backgroundFrom, m_backgroundTo;
    std::vector<uint8_t> m_static; // places that are the same in both frames and stay
+   std::vector<uint32_t> m_fillFrom, m_fillTo; // what an empty place shows (see fillOf)
    double m_first = 0, m_end = 0;
    std::vector<Part> m_parts;
 };

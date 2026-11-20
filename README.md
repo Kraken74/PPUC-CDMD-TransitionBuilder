@@ -149,7 +149,9 @@ and the window follows when you select other frames. The preview shows your two 
   the other frame so that they hardly cross, and changes to the new pixel's color halfway.
   Pixels go to pixels of the same color (white to white, and the white multiplies if the other picture
   has more of it); colors only one frame has are paired by place. Pixels that are the same in both
-  frames (same shade, same color) do not take part: they stay, and the travelling pixels pass in front. The
+  frames (same shade, same color) do not take part; a background of several colors (a dithered sky) is
+  recognised by being the same in both frames, and the places a pixel has left show the nearest background pixel
+  of their row, so the background is never replaced by one flat color. frames (same shade, same color) do not take part: they stay, and the travelling pixels pass in front. The
   background (the color most pixels of the colorized frame have, or the darkest shade) stays where it is and is not
   taken along: only the picture moves, and the background of the other frame takes over at the halfway point. Dust does not need another frame: to black
   or white it leaves that color behind, to another frame it uncovers it.

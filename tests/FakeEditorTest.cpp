@@ -2507,10 +2507,10 @@ void testMorph()
             if (lit[i])
                CHECK(r.visible && r.second && r.x == x && r.y == y);
             else
-               CHECK(!r.visible && r.blank);
+               CHECK(r.visible && r.second && r.x == x && r.y == y); // the other frame's own background
          }
       // On the way, nothing else is lit than the pixels travelling, and the count of travellers
-      // never exceeds what there is; the other frame never shows through (blank, not invisible).
+      // never exceeds what there is; the places without a pixel show the background.
       for (uint32_t step = 1; step < most; ++step)
       {
          size_t shown = 0;
@@ -2518,31 +2518,34 @@ void testMorph()
             for (uint32_t x = 0; x < w; ++x)
             {
                const transitions::Rule r = e->rule(x, y, step, most);
-               CHECK(r.visible || r.blank);
-               shown += r.visible ? 1 : 0;
-               if (r.visible && !r.second)
-                  CHECK(info.shades[static_cast<size_t>(r.y) * w + r.x] > 1);
-               if (r.visible && r.second)
-                  CHECK(info.shadesSecond[static_cast<size_t>(r.y) * w + r.x] > 1);
+               CHECK(r.visible);
+               const size_t at = static_cast<size_t>(r.y) * w + r.x;
+               // A traveller is a lit pixel of its frame; the rest is background.
+               shown += (r.second ? info.shadesSecond[at] : info.shades[at]) > 1 ? 1 : 0;
             }
          CHECK(shown > 0 && shown <= std::max(litA.size(), litB.size()));
       }
       auto again = makeNamed("morph", order, w, h, true);
       CHECK(signatureOf(*e, w, h, most / 2, most) == signatureOf(*again, w, h, most / 2, most));
    }
-   // With a background place, the places without a pixel show it, not black: the first frame's
-   // before the halfway point, the other frame's after it.
+   // Places without a pixel show the background: their own pixel where the frame has background, and
+   // where a pixel has left, the nearest background pixel of its row; the first frame's before the
+   // halfway point, the other frame's after it.
    {
-      transitions::SourceInfo bg = makeInfo(w, h);
-      bg.toFrame = true;
-      bg.background = 0;
-      bg.backgroundSecond = 5;
-      auto e = transitions::findTransition("morph")->make("random", bg);
+      auto e = makeNamed("morph", "random", w, h, true);
       const uint32_t most = e->maxSteps();
-      CHECK(most >= 8);
-      const transitions::Rule early = e->rule(w - 1, 0, 1, most), late = e->rule(w - 1, 0, most, most);
-      CHECK(early.visible && !early.second && early.x == 0 && early.y == 0);
-      CHECK(late.visible && late.second && late.x == 5 && late.y == 0);
+      size_t borrowed = 0;
+      for (uint32_t y = 0; y < h; ++y)
+         for (uint32_t x = 0; x < w; ++x)
+         {
+            const transitions::Rule early = e->rule(x, y, 1, most);
+            if (early.visible && !early.second && info.shades[static_cast<size_t>(y) * w + x] <= 1)
+               CHECK(early.x == x && early.y == y || info.shades[static_cast<size_t>(early.y) * w + early.x] > 1);
+            const transitions::Rule mid = e->rule(x, y, most / 4, most);
+            if (mid.visible && !mid.second && (mid.x != x || mid.y != y) && info.shades[static_cast<size_t>(mid.y) * w + mid.x] <= 1)
+               ++borrowed; // a vacated place shows a background pixel from its neighbourhood
+         }
+      CHECK(borrowed > 0);
    }
    // Colors pair with colors, and what both frames share stays. Frame one: color 100 on the left, 200
    // on the right; frame two: 200 on the left, 100 on the right; in the middle a block that is the
@@ -2592,7 +2595,7 @@ void testMorph()
          for (uint32_t x = 0; x < w; ++x)
          {
             const transitions::Rule r = e->rule(x, y, step, most);
-            if (r.visible && !r.second && r.x >= 10 && r.x < 50)
+            if (r.visible && !r.second && r.x >= 10 && r.x < 50 && r.y >= 8 && r.y < 24 && r.x != x)
             {
                travelled += double(x) - r.x;
                ++count;
