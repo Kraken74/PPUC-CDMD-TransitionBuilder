@@ -8,12 +8,14 @@ new frames, or as a scene, from a frame of your project. It needs the editor's p
 
 | Transition | Options | What it does |
 | --- | --- | --- |
-| **Alternating Slide** | Horizontal, Vertical | Horizontal: even rows slide left and odd rows slide right (starting at row 0). Vertical: even columns slide up and odd columns slide down (starting at column 0). |
+| **Alternating Slide** | Horizontal, Vertical | Horizontal: even rows (0, 2, 4) slide left and odd rows (1, 3, 5) slide right. Vertical: even columns (0, 2, 4) slide up and odd columns (1, 3, 5) slide down. |
 | **Blinds** | Horizontal, Vertical | Bars at regular intervals grow wider. |
 | **Checkerboard** | 2 x 2, 4 x 4, 8 x 8, 16 x 16 | The picture is cut into squares of the size you choose. They disappear one by one: first the squares of one color of a checkerboard, sweeping from the top left corner, then the others. |
 | **Dissolve** | Orderly, Random | Pixels disappear in a regular pattern, or at random. |
+| **Dust** | Right, Left, Up, Down (the wind) | The picture crumbles to dust and the wind blows it away. A wave of wind starts on the side it comes from; the lit pixels fly off, faster and faster, drifting and wobbling, and some are lost on the way. One last speck stays in the last frame. |
 | **Fade** | | The picture gets darker (to black) or brighter (to white) with every frame. |
 | **Melt** | Smooth, Dripping | The picture melts down off the screen: every column slides down at its own speed. Smooth: the speeds follow a wave (the same as Wave, Vertical). Dripping: the speeds look random, in streaks, like paint dripping. |
+| **Morph** | Random, Sweep Right / Left / Down / Up | The lit pixels of the first frame travel across the screen and become the lit pixels of the second frame; everything else is black. Needs `Another frame`. Random: the pixels set off at random moments. Sweep: in a wave from the side you choose. |
 | **Pixelate** | | The picture turns into bigger and bigger blocks (each shows the pixel at its middle), up to blocks as big as the frame is tall. The blocks grow slowly at first and faster later. |
 | **Slide** | Up, Down, Left, Right | The whole picture slides off the screen. |
 | **Split** | Horizontal, Vertical | Cut in the middle; the halves slide apart. Horizontal: cut across, the halves go up and down. Vertical: cut down, the halves go left and right. |
@@ -56,7 +58,7 @@ choices you applied last.
 Every frame of a transition has to differ from the others. A slide moves whole pixels, so a
 frame 32 pixels tall can only be in so many places; blinds can only grow as wide as the gap
 between them. Each transition therefore has a most for the size of your frame, and the list in
-the window stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Horizontal 15.
+the window stops there. On a 128 x 32 frame, for example: Dissolve 255, Split Horizontal 15. Dust and Morph find their most by trying: the frames must all differ.
 Larger frames (192 x 64, 256 x 64) allow more. A fade is limited by how many brightness levels
 the picture has.
 
@@ -141,6 +143,11 @@ and the window follows when you select other frames. The preview shows your two 
   frame, alternating lines bring it in line by line, a wave or a melt lets each row or column of it
   arrive at the speed of the same row or column of the start frame (a melt lets it drip in from the
   top). The choice is only shown for those transitions.
+- **Morph** only works going to another frame (without one it offers no frames). Its pixels are
+  the ones brighter than the darkest shade of each frame; each of them is paired with a pixel of
+  the other frame so that they hardly cross, and changes to the new pixel's color halfway. The
+  background is black, whatever the other frame shows. Dust does not need another frame: to black
+  or white it leaves that color behind, to another frame it uncovers it.
 - Pixelate and Zoom In keep every pixel, so nothing is taken away: they go through both frames.
   The start frame turns into blocks (or zooms in) and then the other frame comes out of the blocks
   (or zooms back out to full size). Their most frames is twice that of a transition to black.
@@ -232,6 +239,6 @@ Wipe Spiral
 
 ## Version
 
-The window's title shows the version (`TransitionFX v1.00`). It is `kVersion` in `src/Version.h`;
+The window's title shows the version (`TransitionFX v1.01`). It is `kVersion` in `src/Version.h`;
 raise it by 0.01 with every update merged into the main branch, and keep `version` in `plugin.cfg`
 the same.

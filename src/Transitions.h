@@ -21,9 +21,11 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string_view>
 #include <tuple>
 #include <vector>
@@ -40,6 +42,8 @@ struct Rule
    uint32_t y;
    bool second = false;  // the pixel is taken from the other frame (x and y are then a place in that
                          // one), in a transition to another frame that goes through both pictures
+   bool blank = false;   // invisible only: the pixel is black even when another frame is underneath
+                         // (the pixel migration shows nothing but the pixels on their way)
 };
 
 // What an effect needs to know about the frame it starts from.
@@ -55,6 +59,8 @@ struct SourceInfo
    bool toFrame = false;          // the transition goes to another frame (shown underneath)
    bool secondMoves = false;      // toFrame: the other frame comes in with the effect, in its pattern,
                                   // instead of staying in place underneath
+   std::vector<uint8_t> shades;       // the original frame's shades, row-major (what Dust and Morph move)
+   std::vector<uint8_t> shadesSecond; // toFrame: the shades of the other frame
    uint32_t crossSpan = 0;        // toFrame: the largest color difference between the two frames, in
                                   // units of a 5-bit channel (what a cross-fade needs to know)
 };
@@ -74,6 +80,10 @@ public:
    // only change what the pixels show, so nothing is taken away for a black or white fill or for
    // another frame to show through. In a transition to another frame they go through both pictures.
    virtual bool takesPixelsAway() const { return true; }
+
+   // True for the effects that move single pixels around (Dust, Morph): frames then do not simply
+   // lose pixels step by step, and their number of frames is found by trying.
+   virtual bool movesPixels() const { return false; }
 
    // Where the pixel (x, y) of the new frame comes from (the identity by default).
    virtual Rule rule(uint32_t x, uint32_t y, uint32_t /*step*/, uint32_t /*steps*/) const
@@ -868,6 +878,435 @@ private:
    uint32_t m_maxSteps = 0;
 };
 
+// ---- Pixel particles (Dust, Morph) ----------------------------------------------------------
+
+// A random number 0 .. 1 (exclusive) from a hash and a salt.
+inline double unitOf(uint64_t hash, uint32_t salt)
+{
+   return static_cast<double>((hash >> (16u * salt)) & 0xFFFFu) / 65536.0;
+}
+
+// A triangle wave of a phase (any number): 0 at 0, 1 at 1/4, 0 at 1/2, -1 at 3/4. Only additions and
+// multiplications, so it is the same on every compiler.
+inline double triangle(double phase)
+{
+   const double f = phase - std::floor(phase);
+   return f < 0.25 ? 4.0 * f : f < 0.75 ? 2.0 - 4.0 * f : 4.0 * f - 4.0;
+}
+
+inline int32_t rounded(double v) { return static_cast<int32_t>(std::floor(v + 0.5)); }
+
+// How far along a direction a place is: 0 at the side the movement starts, 1 at the other.
+inline double sweepPosition(Direction d, uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+{
+   const double ux = width > 1 ? static_cast<double>(x) / (width - 1) : 0.0;
+   const double uy = height > 1 ? static_cast<double>(y) / (height - 1) : 0.0;
+   switch (d)
+   {
+   case Direction::Right: return ux;
+   case Direction::Left: return 1.0 - ux;
+   case Direction::Down: return uy;
+   default: return 1.0 - uy;
+   }
+}
+
+// The frame as the pixel effects see it: which places are lit (brighter than the darkest shade
+// of the picture), and how bright.
+inline std::vector<uint32_t> litPlaces(const std::vector<uint8_t>& shades, uint32_t width, uint32_t height)
+{
+   std::vector<uint32_t> out;
+   if (shades.size() != static_cast<size_t>(width) * height || shades.empty())
+      return out;
+   const uint8_t darkest = *std::min_element(shades.begin(), shades.end());
+   for (size_t i = 0; i < shades.size(); ++i)
+      if (shades[i] > darkest)
+         out.push_back(static_cast<uint32_t>(i));
+   return out;
+}
+
+// What the effects that move single pixels share: a map of what every place shows at one step,
+// built when the step changes, and the number of frames, found by trying.
+class PixelEffect : public Effect
+{
+public:
+   bool movesPixels() const final { return true; }
+
+   uint32_t maxSteps() const final
+   {
+      if (!m_max)
+         m_max = findMax();
+      return *m_max;
+   }
+   Rule rule(uint32_t x, uint32_t y, uint32_t step, uint32_t steps) const final
+   {
+      if (x >= m_width || y >= m_height)
+         return {false, 0, 0};
+      return mapOf(step, steps)[static_cast<size_t>(y) * m_width + x];
+   }
+
+protected:
+   PixelEffect(uint32_t width, uint32_t height) : m_width(width), m_height(height) {}
+   // Whether there is anything to move.
+   virtual bool ready() const = 0;
+   // Fills the map: what each place shows at `step` of `steps`.
+   virtual void build(std::vector<Rule>& cells, uint32_t step, uint32_t steps) const = 0;
+
+   uint32_t m_width, m_height;
+
+private:
+   const std::vector<Rule>& mapOf(uint32_t step, uint32_t steps) const
+   {
+      if (!m_valid || m_step != step || m_steps != steps)
+      {
+         m_cells.assign(static_cast<size_t>(m_width) * m_height, Rule{false, 0, 0});
+         build(m_cells, step, steps);
+         m_step = step;
+         m_steps = steps;
+         m_valid = true;
+      }
+      return m_cells;
+   }
+   // The most frames whose pictures all differ from each other and from the starting frame, among
+   // a few round numbers (the frames get closer together as there are more of them).
+   uint32_t findMax() const
+   {
+      if (!ready())
+         return 0;
+      auto hashOf = [&](const std::vector<Rule>& cells) {
+         uint64_t h = 0x1234567ull;
+         for (const Rule& r : cells)
+            h = mix64(h ^ (r.visible ? (1ull << 40) | (r.second ? 1ull << 41 : 0ull) | (static_cast<uint64_t>(r.x) << 20) | r.y
+                                     : 0ull));
+         return h;
+      };
+      std::vector<Rule> plain(static_cast<size_t>(m_width) * m_height);
+      for (uint32_t y = 0; y < m_height; ++y)
+         for (uint32_t x = 0; x < m_width; ++x)
+            plain[static_cast<size_t>(y) * m_width + x] = Rule{true, x, y};
+      const uint64_t start = hashOf(plain);
+      for (uint32_t n : {64u, 48u, 36u, 30u, 24u, 18u, 12u, 9u, 6u, 4u, 3u, 2u, 1u})
+      {
+         std::vector<uint64_t> seen{start};
+         bool good = true;
+         for (uint32_t step = 1; step <= n && good; ++step)
+         {
+            std::vector<Rule> cells(plain.size(), Rule{false, 0, 0});
+            build(cells, step, n);
+            const uint64_t h = hashOf(cells);
+            good = std::find(seen.begin(), seen.end(), h) == seen.end();
+            seen.push_back(h);
+         }
+         if (good)
+            return n;
+      }
+      return 0;
+   }
+
+   mutable std::vector<Rule> m_cells;
+   mutable uint32_t m_step = 0, m_steps = 0;
+   mutable bool m_valid = false;
+   mutable std::optional<uint32_t> m_max;
+};
+
+// ---- Dust -----------------------------------------------------------------------------------
+
+// Dust: the picture crumbles into single pixels and the wind blows them away. A wave of wind
+// sweeps over the picture from the side it blows from; every lit pixel waits for the wind, then
+// flies off, faster and faster, drifting up and wobbling, and some of them are gone on the way.
+// The pixels of the darkest shade just vanish as the wind passes. What is left is black (or the
+// other frame, which shows underneath).
+class Dust final : public PixelEffect
+{
+public:
+   Dust(Direction wind, const std::vector<uint8_t>& shades, uint32_t width, uint32_t height)
+      : PixelEffect(width, height), m_wind(wind), m_shades(shades)
+   {
+      m_lit = litPlaces(shades, width, height);
+      m_darkest = shades.empty() ? 0 : *std::min_element(shades.begin(), shades.end());
+      if (shades.size() != static_cast<size_t>(width) * height)
+      {
+         m_shades.assign(static_cast<size_t>(width) * height, 0);
+         m_lit.clear();
+      }
+      m_parts.resize(shades.size());
+      const bool horizontal = isHorizontalMove(wind);
+      const double along = horizontal ? width : height;  // the length the wind blows over
+      const double across = horizontal ? height : width; // the other way
+      for (size_t i = 0; i < m_parts.size(); ++i)
+      {
+         const uint32_t x = static_cast<uint32_t>(i % width), y = static_cast<uint32_t>(i / width);
+         const uint64_t h = mix64(0xD057ull * 0x10001ull + i);
+         Part& p = m_parts[i];
+         p.start = 0.5 * sweepPosition(wind, x, y, width, height) + 0.12 * unitOf(h, 0);
+         p.flight = 0.30 + 0.12 * unitOf(h, 1);
+         p.speed = along * (0.31 + 0.69 * unitOf(h, 2));
+         p.life = 0.55 + 0.45 * unitOf(h, 3);
+         p.rise = across * (0.12 + 0.40 * unitOf(h, 3));
+         p.wobble = (1.5 + 3.5 * unitOf(h, 2)) * across / 32.0;
+         p.phase = unitOf(h, 3);
+      }
+      // The first lit pixel starts at once, and the picture is gone when the last one has flown its flight.
+      double first = 1e9;
+      for (size_t i = 0; i < m_parts.size(); ++i)
+         if (isLit(i))
+            first = std::min(first, m_parts[i].start);
+      for (Part& p : m_parts)
+         p.start -= first < 1e9 ? first : 0.0;
+      // The one that flies last is a speck that stays on the screen, drifting slowly, until the end:
+      // the last frame is never empty.
+      // It is one of the lit pixels with room to fly, so that it keeps moving until the end.
+      auto room = [&](size_t i) {
+         const double x = static_cast<double>(i % width), y = static_cast<double>(i / width);
+         switch (wind)
+         {
+         case Direction::Right: return width - 1 - x;
+         case Direction::Left: return x;
+         case Direction::Down: return height - 1 - y;
+         default: return y;
+         }
+      };
+      size_t last = 0;
+      bool found = false;
+      for (size_t i = 0; i < m_parts.size(); ++i)
+         if (isLit(i) && room(i) >= 0.4 * along &&
+             (!found || m_parts[i].start + m_parts[i].flight > m_parts[last].start + m_parts[last].flight))
+         {
+            last = i;
+            found = true;
+         }
+      for (size_t i = 0; i < m_parts.size() && !found; ++i) // no such pixel: the one with the most room
+         if (isLit(i) && (!isLit(last) || room(i) > room(last)))
+            last = i;
+      m_parts[last].life = 2.0;
+      m_parts[last].speed = room(last) * 0.9;
+      m_parts[last].rise = 0;
+      m_parts[last].wobble = 0;
+      m_parts[last].lingers = true;
+      m_end = 0.0;
+      for (size_t i = 0; i < m_parts.size(); ++i)
+         if (isLit(i) && !m_parts[i].lingers)
+            m_end = std::max(m_end, m_parts[i].start + m_parts[i].flight * std::min(1.0, m_parts[i].life));
+      // It flies until the others are gone, so that it is still moving in the last frame.
+      m_parts[last].flight = std::max(m_parts[last].flight, m_end - m_parts[last].start);
+      m_end = m_parts[last].start + m_parts[last].flight;
+   }
+   const char* limitReason() const override
+   {
+      return ready() ? "the pixels' flights end at different moments" : "the frame has no lit pixels";
+   }
+
+protected:
+   bool ready() const override { return !m_lit.empty(); }
+   void build(std::vector<Rule>& cells, uint32_t step, uint32_t steps) const override
+   {
+      const double t = m_end * static_cast<double>(step) / steps;
+      // Which direction the wind blows, and which way the pixels drift up from the ground.
+      double dx = 0, dy = 0, ux = 0, uy = -1;
+      switch (m_wind)
+      {
+      case Direction::Right: dx = 1; break;
+      case Direction::Left: dx = -1; break;
+      case Direction::Down: dy = 1; ux = -1; uy = 0; break;
+      default: dy = -1; ux = -1; uy = 0; break;
+      }
+      std::vector<int> rank(cells.size(), -2);
+      for (size_t i = 0; i < m_parts.size(); ++i)
+      {
+         const Part& p = m_parts[i];
+         const uint32_t x = static_cast<uint32_t>(i % m_width), y = static_cast<uint32_t>(i / m_width);
+         int32_t px = static_cast<int32_t>(x), py = static_cast<int32_t>(y);
+         int level;
+         const bool lit = isLit(i);
+         if (lit)
+         {
+            level = m_shades[i];
+            double l = (t - p.start) / p.flight;
+            if (p.lingers)
+               l = std::min(l, 0.999);
+            else if (l >= p.life || l >= 1.0)
+               continue; // gone
+            if (l > 0)
+            {
+               const double run = p.speed * (0.35 * l + 0.65 * l * l);
+               const double lift = p.rise * l;
+               const double sway = p.wobble * triangle(p.phase + 1.4 * l) * l;
+               px = rounded(x + run * dx + (lift + sway) * ux);
+               py = rounded(y + run * dy + (lift + sway) * uy);
+            }
+         }
+         else
+         {
+            level = -1;
+            if (t >= p.start)
+               continue; // the wind has passed
+         }
+         if (lit && p.lingers) // the last speck stays on the screen, at the edge if it has to
+         {
+            px = std::clamp(px, 0, static_cast<int32_t>(m_width) - 1);
+            py = std::clamp(py, 0, static_cast<int32_t>(m_height) - 1);
+         }
+         if (px < 0 || py < 0 || px >= static_cast<int32_t>(m_width) || py >= static_cast<int32_t>(m_height))
+            continue; // blown out of the frame
+         const size_t at = static_cast<size_t>(py) * m_width + px;
+         if (level > rank[at])
+         {
+            rank[at] = level;
+            cells[at] = Rule{true, x, y};
+         }
+      }
+   }
+
+private:
+   bool isLit(size_t i) const { return m_shades[i] > m_darkest; }
+   struct Part
+   {
+      double start = 0, flight = 0.3, speed = 0, life = 1, rise = 0, wobble = 0, phase = 0;
+      bool lingers = false; // stays until the last frame
+   };
+   Direction m_wind;
+   std::vector<uint8_t> m_shades;
+   std::vector<uint32_t> m_lit;
+   uint8_t m_darkest = 0;
+   double m_end = 0.01;
+   std::vector<Part> m_parts;
+};
+
+// ---- Morph ----------------------------------------------------------------------------------
+
+// Morph: the lit pixels of the first frame travel to the lit pixels of the other frame, each one
+// to a partner chosen so that the pixels hardly cross (both pictures are cut in halves again and
+// again, along their longer side, and the halves are paired). On the way a pixel changes from its
+// old color to its new one. Everything else is black. Random: the pixels leave at random moments.
+// Sweep: they leave in a wave from the side the sweep starts at.
+class Morph final : public PixelEffect
+{
+public:
+   // `sweep` false: random moments.
+   Morph(bool sweep, Direction direction, const std::vector<uint8_t>& from, const std::vector<uint8_t>& to,
+         uint32_t width, uint32_t height)
+      : PixelEffect(width, height), m_from(from), m_to(to)
+   {
+      std::vector<uint32_t> a = litPlaces(from, width, height);
+      std::vector<uint32_t> b = litPlaces(to, width, height);
+      if (a.empty() || b.empty())
+         return;
+      // As many partners on both sides: the smaller picture's pixels are used more than once.
+      const size_t count = std::max(a.size(), b.size());
+      std::vector<Pt> pa(count), pb(count);
+      for (size_t i = 0; i < count; ++i)
+      {
+         const uint32_t ia = a[i * a.size() / count], ib = b[i * b.size() / count];
+         pa[i] = {ia % width, ia / width};
+         pb[i] = {ib % width, ib / width};
+      }
+      pair(pa, pb, 0, count);
+      m_parts.resize(count);
+      for (size_t i = 0; i < count; ++i)
+      {
+         Part& p = m_parts[i];
+         p.sx = pa[i].x;
+         p.sy = pa[i].y;
+         p.dx = pb[i].x;
+         p.dy = pb[i].y;
+         const double r = unitOf(mix64(0x30F4ull * 0x10001ull + i), 0);
+         if (sweep)
+         {
+            p.delay = 0.25 * sweepPosition(direction, p.sx, p.sy, width, height) + 0.08 * r;
+            p.span = 0.67;
+         }
+         else
+         {
+            p.delay = 0.30 * r;
+            p.span = 0.70;
+         }
+      }
+      // The first pixel sets off at once, and the last one arrives with the last frame.
+      double first = 1e9;
+      for (const Part& p : m_parts)
+         first = std::min(first, p.delay);
+      for (Part& p : m_parts)
+      {
+         p.delay -= first;
+         m_end = std::max(m_end, p.delay + p.span);
+      }
+   }
+   const char* limitReason() const override
+   {
+      return ready() ? "the pixels travel a few pixels more with every frame"
+                     : "Morph goes to another frame, and both frames need lit pixels";
+   }
+
+protected:
+   bool ready() const override { return !m_parts.empty(); }
+   void build(std::vector<Rule>& cells, uint32_t step, uint32_t steps) const override
+   {
+      for (Rule& r : cells)
+         r = Rule{false, 0, 0, false, true}; // black, whatever the other frame shows
+      std::vector<int> rank(cells.size(), -1);
+      const double t = static_cast<double>(step) / steps;
+      for (const Part& p : m_parts)
+      {
+         // The time runs until the last pixel has arrived, so that the last frame is the picture.
+         double local = std::min(1.0, std::max(0.0, (t * m_end - p.delay) / p.span));
+         double e = 1.0;
+         if (local < 1.0)
+            e = 0.5 * (local + local * local * (3.0 - 2.0 * local));
+         const int32_t px = rounded(p.sx + (static_cast<double>(p.dx) - p.sx) * e);
+         const int32_t py = rounded(p.sy + (static_cast<double>(p.dy) - p.sy) * e);
+         const bool arrived = local >= 0.5; // the pixel has its new color from the halfway point
+         const size_t from = static_cast<size_t>(p.sy) * m_width + p.sx;
+         const size_t to = static_cast<size_t>(p.dy) * m_width + p.dx;
+         const int level = arrived ? m_to[to] : m_from[from];
+         const size_t at = static_cast<size_t>(py) * m_width + px;
+         if (level > rank[at])
+         {
+            rank[at] = level;
+            cells[at] = arrived ? Rule{true, p.dx, p.dy, true} : Rule{true, p.sx, p.sy};
+         }
+      }
+   }
+
+private:
+   struct Pt
+   {
+      uint32_t x, y;
+   };
+   struct Part
+   {
+      uint32_t sx = 0, sy = 0, dx = 0, dy = 0;
+      double delay = 0, span = 1;
+   };
+   // Pairs a[lo, hi) with b[lo, hi) (equally long): cut both along the longer side of the box that
+   // holds them, in the middle, and pair the halves. In the end the pixel i of a goes to pixel i of b.
+   static void pair(std::vector<Pt>& a, std::vector<Pt>& b, size_t lo, size_t hi)
+   {
+      if (hi - lo < 2)
+         return;
+      uint32_t x0 = UINT32_MAX, x1 = 0, y0 = UINT32_MAX, y1 = 0;
+      for (const std::vector<Pt>* v : {&a, &b})
+         for (size_t i = lo; i < hi; ++i)
+         {
+            x0 = std::min(x0, (*v)[i].x);
+            x1 = std::max(x1, (*v)[i].x);
+            y0 = std::min(y0, (*v)[i].y);
+            y1 = std::max(y1, (*v)[i].y);
+         }
+      const bool byX = x1 - x0 >= y1 - y0;
+      auto less = [byX](const Pt& l, const Pt& r) {
+         return byX ? (l.x != r.x ? l.x < r.x : l.y < r.y) : (l.y != r.y ? l.y < r.y : l.x < r.x);
+      };
+      std::sort(a.begin() + lo, a.begin() + hi, less);
+      std::sort(b.begin() + lo, b.begin() + hi, less);
+      const size_t mid = lo + (hi - lo) / 2;
+      pair(a, b, lo, mid);
+      pair(a, b, mid, hi);
+   }
+
+   std::vector<uint8_t> m_from, m_to;
+   double m_end = 0;
+   std::vector<Part> m_parts;
+};
+
 // ---- The list -------------------------------------------------------------------------------
 
 // A choice a transition has (its direction, its type ...).
@@ -887,6 +1326,7 @@ struct Transition
    size_t optionCount;
    std::unique_ptr<Effect> (*make)(const char* optionId, const SourceInfo& source);
    bool canMoveSecond = false; // in a transition to another frame, that frame can come in with the effect
+   bool needsFrame = false;    // the transition only works when it goes to another frame
 };
 
 inline bool same(const char* a, const char* b) { return std::string_view(a) == std::string_view(b); }
@@ -965,6 +1405,25 @@ inline std::unique_ptr<Effect> makeSplit(const char* option, const SourceInfo& s
    return std::make_unique<Split>(same(option, "vertical"), s.width, s.height);
 }
 
+// Dust: the direction the wind blows.
+inline std::unique_ptr<Effect> makeDust(const char* option, const SourceInfo& s)
+{
+   const Direction wind = same(option, "left") ? Direction::Left : same(option, "up") ? Direction::Up
+                          : same(option, "down") ? Direction::Down : Direction::Right;
+   return std::make_unique<Dust>(wind, s.shades, s.width, s.height);
+}
+// Morph: the pixels leave at random moments or in a sweep; without another frame there is nothing
+// to morph into (the effect then offers no frames).
+inline std::unique_ptr<Effect> makeMorph(const char* option, const SourceInfo& s)
+{
+   const bool sweep = !same(option, "random");
+   const Direction d = same(option, "left") ? Direction::Left : same(option, "up") ? Direction::Up
+                       : same(option, "down") ? Direction::Down : Direction::Right;
+   if (!s.toFrame)
+      return std::make_unique<Morph>(sweep, d, std::vector<uint8_t>(), std::vector<uint8_t>(), s.width, s.height);
+   return std::make_unique<Morph>(sweep, d, s.shades, s.shadesSecond, s.width, s.height);
+}
+
 inline const Option kDissolveOptions[] = {
    {"orderly", "Orderly"}, {"random", "Random"},
 };
@@ -980,6 +1439,12 @@ inline const Option kSquareOptions[] = {
 inline const Option kMeltOptions[] = {
    {"smooth", "Smooth"}, {"drips", "Dripping"},
 };
+inline const Option kWindOptions[] = {
+   {"right", "Right"}, {"left", "Left"}, {"up", "Up"}, {"down", "Down"},
+};
+inline const Option kMorphOptions[] = {
+   {"random", "Random"}, {"right", "Sweep Right"}, {"left", "Sweep Left"}, {"down", "Sweep Down"}, {"up", "Sweep Up"},
+};
 inline const Option kZoomOptions[] = {
    {"in", "In"}, {"out", "Out"},
 };
@@ -992,11 +1457,12 @@ inline const Option kWipeOptions[] = {
 
 inline const Transition kTransitions[] = {
    {"alternating_slide", "Alternating Slide",
-    "Horizontal: even rows slide left and odd rows slide right (starting at row 0)\n"
-    "Vertical: even columns slide up and odd columns slide down (starting at column 0)",
+    "Horizontal: even rows (0,2,4) slide left and odd rows (1,3,5) slide right\n"
+    "Vertical: even columns (0,2,4) slide up and odd columns (1,3,5) slide down",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeAlternatingSlide, true},
    {"blinds", "Blinds",
-    "Bars appear at regular intervals and grow wider. Horizontal: horizontal bars, stacked. "
+    "Bars appear at regular intervals and grow wider.\n"
+    "Horizontal: horizontal bars, stacked.\n"
     "Vertical: vertical bars, side by side.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeBlinds},
    {"checkerboard", "Checkerboard",
@@ -1004,45 +1470,59 @@ inline const Transition kTransitions[] = {
     "of a checkerboard, in a sweep from the top left corner, then the others.",
     "Square Size", kSquareOptions, TB_COUNT(kSquareOptions), &makeCheckerboard},
    {"dissolve", "Dissolve",
-    "The picture dissolves pixel by pixel. Orderly: pixels disappear in a regular pattern. "
+    "The picture dissolves pixel by pixel.\n"
+    "Orderly: pixels disappear in a regular pattern.\n"
     "Random: pixels disappear at random.",
     "Dissolve Type", kDissolveOptions, TB_COUNT(kDissolveOptions), &makeDissolve},
+   {"dust", "Dust",
+    "The picture crumbles to dust and the wind blows it away.\n"
+    "The option is the direction the wind blows. The pixels fly off in a wave, starting on the side the wind comes from.",
+    "Wind", kWindOptions, TB_COUNT(kWindOptions), &makeDust},
    {"fade", "Fade",
     "The first frame gradually fades to black, white or the second frame.",
     nullptr, nullptr, 0, &makeFade},
    {"melt", "Melt",
-    "The picture melts down off the screen: every column slides down at its own speed. Smooth: "
-    "the speeds follow a wave. Dripping: the speeds look random, like paint dripping.",
+    "The picture melts down off the screen: every column slides down at its own speed.\n"
+    "Smooth: the speeds follow a wave.\n"
+    "Dripping: the speeds look random, like paint dripping.",
     "Style", kMeltOptions, TB_COUNT(kMeltOptions), &makeMelt, true},
+   {"morph", "Morph",
+    "The lit pixels of the first frame travel across the screen and become the lit pixels of the second frame. "
+    "Everything else is black. Needs Another frame.\n"
+    "Random: the pixels set off at random moments.\n"
+    "Sweep: they set off in a wave, starting on the side you choose.",
+    "Order", kMorphOptions, TB_COUNT(kMorphOptions), &makeMorph, false, true},
    {"pixelate", "Pixelate",
-    "The first frame turns into bigger and bigger blocks, slowly at first and then faster. To "
-    "another frame: the other frame then comes out of the blocks and sharpens.",
+    "The first frame turns into bigger and bigger blocks, slowly at first and then faster.\n"
+    "To another frame: the other frame then comes out of the blocks and sharpens.",
     nullptr, nullptr, 0, &makePixelate},
    {"slide", "Slide",
     "The whole picture slides off the screen in the direction you choose.",
     "Direction", kDirectionOptions, TB_COUNT(kDirectionOptions), &makeSlide, true},
    {"split", "Split",
-    "The picture is cut in the middle and the two halves slide apart. Horizontal: cut across, "
-    "the top half slides up and the bottom half down. Vertical: cut down, the left half slides "
-    "left and the right half right.",
+    "The picture is cut in the middle and the two halves slide apart.\n"
+    "Horizontal: cut across, the top half slides up and the bottom half down.\n"
+    "Vertical: cut down, the left half slides left and the right half right.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeSplit},
    {"wave", "Wave",
-    "The picture turns into a wavy curtain that is pulled out of the frame. Horizontal: the rows "
-    "slide sideways, in one wave over the height. Vertical: the columns slide down, in four waves "
-    "over the width. The crests go twice as fast as the troughs.",
+    "The picture turns into a wavy curtain that is pulled out of the frame. The crests go twice as fast as the troughs.\n"
+    "Horizontal: the rows slide sideways, in one wave over the height.\n"
+    "Vertical: the columns slide down, in four waves over the width.",
     "Orientation", kOrientationOptions, TB_COUNT(kOrientationOptions), &makeWave, true},
    {"wipe", "Wipe",
-    "A bar wipes over the picture in the direction you choose (Left: it comes in from the right "
-    "edge and moves left). Centre-Out: a shape grows from the centre. Edge-In: the picture "
-    "closes in from the outside edges. Spiral: a spiral winds in from the top left corner.",
+    "A bar wipes over the picture in the direction you choose\n"
+    "Left: it comes in from the right edge and moves left.\n"
+    "Centre-Out: an oval shape grows from the centre.\n"
+    "Edge-In: the picture closes in from the outside edges.\n"
+    "Spiral: a spiral winds in from the top left corner.",
     "Wipe Type", kWipeOptions, TB_COUNT(kWipeOptions), &makeWipe},
    {"zoom", "Zoom",
-    "Zoom In: the picture grows toward you, a smaller and smaller part of the middle fills the "
-    "frame. To another frame: it zooms into the first frame, then the other frame zooms out to "
-    "full size. Zoom Out: the picture shrinks toward the middle.",
+    "Zoom In: the picture grows toward you, a smaller and smaller part of the middle fills the frame.\n"
+    "To another frame: it zooms into the first frame, then the other frame zooms out to full size.\n"
+    "Zoom Out: the picture shrinks toward the middle.",
     "Zoom", kZoomOptions, TB_COUNT(kZoomOptions), &makeZoom},
 };
-inline constexpr size_t kTransitionCount = 12;
+inline constexpr size_t kTransitionCount = 14;
 static_assert(sizeof(kTransitions) / sizeof(kTransitions[0]) == kTransitionCount, "update kTransitionCount");
 
 #undef TB_COUNT

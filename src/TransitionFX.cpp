@@ -305,6 +305,9 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
+   info.shades = source.original;
+   if (second)
+      info.shadesSecond = second->original;
    if (!source.original.empty())
    {
       info.brightestShade = *std::max_element(source.original.begin(), source.original.end());

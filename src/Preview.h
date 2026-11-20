@@ -37,7 +37,11 @@ void renderStep(const std::vector<T>& source, std::vector<T>& out, uint32_t widt
          const uint32_t cellY = static_cast<uint32_t>(static_cast<uint64_t>(y) * originalHeight / height);
          const transitions::Rule from = effect.rule(cellX, cellY, step, steps);
          if (!from.visible)
+         {
+            if (from.blank)
+               out[static_cast<size_t>(y) * width + x] = black; // black, whatever is underneath
             continue;
+         }
          // The pixel's place inside its cell, then the same place in the source cell.
          const uint32_t insideX = x - static_cast<uint32_t>(static_cast<uint64_t>(cellX) * width / originalWidth);
          const uint32_t insideY = y - static_cast<uint32_t>(static_cast<uint64_t>(cellY) * height / originalHeight);
