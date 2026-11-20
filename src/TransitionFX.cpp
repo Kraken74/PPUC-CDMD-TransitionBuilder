@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -412,9 +413,14 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
       if (info.same.size() == info.tones.size() && info.tones.size() == source.original.size() && !source.original.empty())
       {
          const uint8_t darkest = *std::min_element(source.original.begin(), source.original.end());
+         // Only colors with a good share of the frame: a few black pixels are not a background.
+         std::map<uint16_t, size_t> count;
          for (size_t i = 0; i < info.same.size(); ++i)
             if (info.same[i] && source.original[i] <= darkest)
-               background.insert(info.tones[i]);
+               ++count[info.tones[i]];
+         for (const auto& c : count)
+            if (c.second * 50 >= info.same.size())
+               background.insert(c.first);
       }
       info.shades = movingShades(source, info.background, background);
       info.shadesSecond = movingShades(*second, info.backgroundSecond, background);

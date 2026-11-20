@@ -2528,24 +2528,30 @@ void testMorph()
       auto again = makeNamed("morph", order, w, h, true);
       CHECK(signatureOf(*e, w, h, most / 2, most) == signatureOf(*again, w, h, most / 2, most));
    }
-   // Places without a pixel show the background: their own pixel where the frame has background, and
-   // where a pixel has left, the nearest background pixel of its row; the first frame's before the
-   // halfway point, the other frame's after it.
+   // Places without a pixel show the background, never black: where the frame has background, its own
+   // pixel (the first frame's before the halfway point, the other frame's after it); where it has a
+   // pixel, the background of the other frame if that has background there (the sky behind the cow
+   // stays), else the nearest background pixel of the row.
    {
       auto e = makeNamed("morph", "random", w, h, true);
       const uint32_t most = e->maxSteps();
-      size_t borrowed = 0;
-      for (uint32_t y = 0; y < h; ++y)
-         for (uint32_t x = 0; x < w; ++x)
-         {
-            const transitions::Rule early = e->rule(x, y, 1, most);
-            if (early.visible && !early.second && info.shades[static_cast<size_t>(y) * w + x] <= 1)
-               CHECK(early.x == x && early.y == y || info.shades[static_cast<size_t>(early.y) * w + early.x] > 1);
-            const transitions::Rule mid = e->rule(x, y, most / 4, most);
-            if (mid.visible && !mid.second && (mid.x != x || mid.y != y) && info.shades[static_cast<size_t>(mid.y) * w + mid.x] <= 1)
-               ++borrowed; // a vacated place shows a background pixel from its neighbourhood
-         }
-      CHECK(borrowed > 0);
+      size_t behind = 0;
+      for (uint32_t step : {1u, most / 4, most / 2, most - 1})
+         for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+            {
+               const transitions::Rule r = e->rule(x, y, step, most);
+               CHECK(r.visible); // no black
+               const size_t cell = static_cast<size_t>(y) * w + x, at = static_cast<size_t>(r.y) * w + r.x;
+               const bool lit = (r.second ? info.shadesSecond[at] : info.shades[at]) > 1;
+               // A pixel of the picture is a traveller (somewhere else) or sits at its own place.
+               if (lit)
+                  continue;
+               // Background: a vacated place of the first frame shows the other frame's background there.
+               if (info.shades[cell] > 1 && info.shadesSecond[cell] <= 1 && r.second && r.x == x && r.y == y)
+                  ++behind;
+            }
+      CHECK(behind > 0);
    }
    // Colors pair with colors, and what both frames share stays. Frame one: color 100 on the left, 200
    // on the right; frame two: 200 on the left, 100 on the right; in the middle a block that is the

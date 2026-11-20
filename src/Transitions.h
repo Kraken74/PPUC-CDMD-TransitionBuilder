@@ -1191,36 +1191,54 @@ private:
 class Morph final : public PixelEffect
 {
 public:
-   // What a place shows when no pixel is on it: its own pixel if the frame has only background
-   // there, else the nearest background pixel in its row (or column, or the frame's background
-   // place); UINT32_MAX if there is none: black.
-   std::vector<uint32_t> fillOf(const std::vector<uint8_t>& shades, uint32_t backgroundPlace) const
+   // The nearest place in the row (then column) that has only background in the frame, UINT32_MAX if
+   // there is none.
+   static uint32_t nearestBackground(const std::vector<uint8_t>& shades, uint8_t darkest, uint32_t width,
+                                     uint32_t height, int64_t x, int64_t y)
    {
-      std::vector<uint32_t> fill(shades.size(), UINT32_MAX);
-      if (shades.size() != static_cast<size_t>(m_width) * m_height || shades.empty())
-         return fill;
-      const uint8_t darkest = *std::min_element(shades.begin(), shades.end());
-      auto unlit = [&](int64_t x, int64_t y) { return shades[static_cast<size_t>(y) * m_width + x] <= darkest; };
-      for (int64_t y = 0; y < m_height; ++y)
-         for (int64_t x = 0; x < m_width; ++x)
+      auto unlit = [&](int64_t px, int64_t py) { return shades[static_cast<size_t>(py) * width + px] <= darkest; };
+      for (int64_t d = 0; d < std::max<int64_t>(width, height); ++d)
+      {
+         if (x - d >= 0 && unlit(x - d, y))
+            return static_cast<uint32_t>(y * width + x - d);
+         if (x + d < width && unlit(x + d, y))
+            return static_cast<uint32_t>(y * width + x + d);
+         if (y - d >= 0 && unlit(x, y - d))
+            return static_cast<uint32_t>((y - d) * width + x);
+         if (y + d < height && unlit(x, y + d))
+            return static_cast<uint32_t>((y + d) * width + x);
+      }
+      return UINT32_MAX;
+   }
+
+   // What every place shows when no pixel is on it, early (before the halfway point) and late. Where
+   // a frame has only background, that is the place's own pixel in that frame, the first frame's
+   // early and the other frame's late; where it has none, the other frame's own pixel if that has
+   // background there (the sky behind the cow is still there, though the cow's pixels are not yet);
+   // where both frames have a pixel, the nearest background pixel of the row.
+   void makeEmpties()
+   {
+      const size_t cells = static_cast<size_t>(m_width) * m_height;
+      m_emptyEarly.assign(cells, Rule{false, 0, 0, false, true}); // black, whatever the other frame shows
+      m_emptyLate = m_emptyEarly;
+      if (m_from.size() != cells || m_to.size() != cells || cells == 0)
+         return;
+      const uint8_t darkFrom = *std::min_element(m_from.begin(), m_from.end());
+      const uint8_t darkTo = *std::min_element(m_to.begin(), m_to.end());
+      for (uint32_t y = 0; y < m_height; ++y)
+         for (uint32_t x = 0; x < m_width; ++x)
          {
-            uint32_t found = UINT32_MAX;
-            if (unlit(x, y))
-               found = static_cast<uint32_t>(y * m_width + x);
-            for (int64_t d = 1; d < std::max<int64_t>(m_width, m_height) && found == UINT32_MAX; ++d)
-            {
-               if (x - d >= 0 && unlit(x - d, y))
-                  found = static_cast<uint32_t>(y * m_width + x - d);
-               else if (x + d < m_width && unlit(x + d, y))
-                  found = static_cast<uint32_t>(y * m_width + x + d);
-               else if (y - d >= 0 && unlit(x, y - d))
-                  found = static_cast<uint32_t>((y - d) * m_width + x);
-               else if (y + d < m_height && unlit(x, y + d))
-                  found = static_cast<uint32_t>((y + d) * m_width + x);
-            }
-            fill[static_cast<size_t>(y) * m_width + x] = found != UINT32_MAX ? found : backgroundPlace;
+            const size_t i = static_cast<size_t>(y) * m_width + x;
+            const bool unlitFrom = m_from[i] <= darkFrom, unlitTo = m_to[i] <= darkTo;
+            const Rule own{true, x, y, false}, ownTo{true, x, y, true};
+            auto near = [&](const std::vector<uint8_t>& shades, uint8_t dark, uint32_t place, bool second) {
+               const uint32_t f = nearestBackground(shades, dark, m_width, m_height, x, y);
+               const uint32_t g = f != UINT32_MAX ? f : place;
+               return g == UINT32_MAX || g >= cells ? Rule{false, 0, 0, false, true} : Rule{true, g % m_width, g / m_width, second};
+            };
+            m_emptyEarly[i] = unlitFrom ? own : unlitTo ? ownTo : near(m_from, darkFrom, m_backgroundFrom, false);
+            m_emptyLate[i] = unlitTo ? ownTo : unlitFrom ? own : near(m_to, darkTo, m_backgroundTo, true);
          }
-      return fill;
    }
 
    // `sweep` false: random moments. Without the other frame (shades empty) there is nothing to do.
@@ -1230,8 +1248,7 @@ public:
    {
       const uint32_t width = s.width, height = s.height;
       const size_t cells = static_cast<size_t>(width) * height;
-      m_fillFrom = fillOf(m_from, m_backgroundFrom);
-      m_fillTo = fillOf(m_to, m_backgroundTo);
+      makeEmpties();
       std::vector<uint32_t> a = litPlaces(m_from, width, height);
       std::vector<uint32_t> b = litPlaces(m_to, width, height);
       if (a.empty() || b.empty())
@@ -1358,13 +1375,9 @@ protected:
       // What a place shows when no pixel is on it: the background of the first frame, and from the
       // halfway point that of the other one; black when a frame has no background.
       const bool late = 2 * step >= steps;
-      const std::vector<uint32_t>& fill = late ? m_fillTo : m_fillFrom;
+      const std::vector<Rule>& empty = late ? m_emptyLate : m_emptyEarly;
       for (size_t i = 0; i < cells.size(); ++i)
-      {
-         const uint32_t f = i < fill.size() ? fill[i] : UINT32_MAX;
-         cells[i] = f == UINT32_MAX ? Rule{false, 0, 0, false, true} // black, whatever the other frame shows
-                                     : Rule{true, f % m_width, f / m_width, late};
-      }
+         cells[i] = i < empty.size() ? empty[i] : Rule{false, 0, 0, false, true};
       std::vector<int> rank(cells.size(), -1);
       for (size_t i = 0; i < m_static.size() && i < cells.size(); ++i)
          if (m_static[i])
@@ -1466,7 +1479,7 @@ private:
    std::vector<uint8_t> m_from, m_to;
    uint32_t m_backgroundFrom, m_backgroundTo;
    std::vector<uint8_t> m_static; // places that are the same in both frames and stay
-   std::vector<uint32_t> m_fillFrom, m_fillTo; // what an empty place shows (see fillOf)
+   std::vector<Rule> m_emptyEarly, m_emptyLate; // what a place without a pixel shows (see makeEmpties)
    double m_first = 0, m_end = 0;
    std::vector<Part> m_parts;
 };
