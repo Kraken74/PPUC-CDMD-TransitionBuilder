@@ -94,7 +94,7 @@ All of it, frames and scene, is one step of the editor's history.
 1. Get the plugin folder `TransitionFX` (see "Getting the plugin" below). It contains
    `plugin.cfg` and the plugin libraries: `plugin-transitionfx64.dll` (Windows x64),
    `plugin-transitionfx.dll` (Windows x86), `plugin-transitionfx.so` (Linux x64 and aarch64) and
-   `plugin-transitionfx.dylib` (macOS arm64). The folder from the `TransitionFX-all-platforms`
+   `plugin-transitionfx.dylib` (macOS arm64). The folder from the `TransitionFX-all-platforms_v101`
    download holds all of them; the editor loads the one that fits the computer.
 2. In the editor, open `Settings -> Plugins` and click `Open Folder`. Put the whole
    `TransitionFX` folder into that folder (on Windows usually
@@ -118,8 +118,8 @@ GitHub builds it for you, for Windows (x64 and x86), Linux (x64 and aarch64) and
 
 1. Open the repository's `Actions` tab. The `Build plugin` run starts by itself after a push (or
    choose it and click `Run workflow`).
-2. When the run is green, open it and download `TransitionFX-all-platforms` under `Artifacts`
-   (or the one for your platform, such as `TransitionFX-windows-x64`). Unpack it: it holds the
+2. When the run is green, open it and download `TransitionFX-all-platforms_v101` (the version is in the name) under `Artifacts`
+   (or the one for your platform, such as `TransitionFX-windows-x64_v101`). Unpack it: it holds the
    `TransitionFX` folder from the steps above.
 
 Every platform build also runs the tests. They come after the upload, so a failing test never
@@ -147,7 +147,8 @@ and the window follows when you select other frames. The preview shows your two 
   the ones brighter than the darkest shade of each frame, plus the pixels you colored in where the
   original is black (a colorized pixel that is not black, or in a dynamic zone, counts too); each of them is paired with a pixel of
   the other frame so that they hardly cross, and changes to the new pixel's color halfway. The
-  background is black, whatever the other frame shows. Dust does not need another frame: to black
+  background (the color most pixels of the colorized frame have, or the darkest shade) stays where it is and is not
+  taken along: only the picture moves, and the background of the other frame takes over at the halfway point. Dust does not need another frame: to black
   or white it leaves that color behind, to another frame it uncovers it.
 - Pixelate and Zoom In keep every pixel, so nothing is taken away: they go through both frames.
   The start frame turns into blocks (or zooms in) and then the other frame comes out of the blocks
@@ -238,8 +239,16 @@ Wipe Spiral
 
 <img width="640" height="160" alt="Wipe Spiral" src="https://github.com/user-attachments/assets/66c894c3-2344-43f0-83c3-ad7f8366417b" />
 
+## Languages
+
+The window follows the editor's language (editor API version 11, `GetLanguage`): English, German
+and French. The words follow the editor's own translations. An unknown language, or an editor
+before version 11, gives English. The texts are in `src/Translations.h`, English first; a text
+without a translation is shown in English, and a test checks that every transition's texts
+have both.
+
 ## Version
 
-The window's title shows the version (`TransitionFX v1.01`). It is `kVersion` in `src/Version.h`;
+The window's title shows the version (`TransitionFX v1.01`), and the files the build makes carry it (`TransitionFX-windows-x64_v101`). It is `kVersion` in `src/Version.h`;
 raise it by 0.01 with every update merged into the main branch, and keep `version` in `plugin.cfg`
 the same.

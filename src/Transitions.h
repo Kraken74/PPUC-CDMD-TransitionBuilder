@@ -61,6 +61,10 @@ struct SourceInfo
                                   // instead of staying in place underneath
    std::vector<uint8_t> shades;       // the original frame's shades, row-major (what Dust and Morph move)
    std::vector<uint8_t> shadesSecond; // toFrame: the shades of the other frame
+   // A place (row * width + column) that shows the frame's background, UINT32_MAX for none; Morph
+   // leaves the background where it is instead of making it black.
+   uint32_t background = UINT32_MAX;
+   uint32_t backgroundSecond = UINT32_MAX;
    uint32_t crossSpan = 0;        // toFrame: the largest color difference between the two frames, in
                                   // units of a 5-bit channel (what a cross-fade needs to know)
 };
@@ -1183,8 +1187,8 @@ class Morph final : public PixelEffect
 public:
    // `sweep` false: random moments.
    Morph(bool sweep, Direction direction, const std::vector<uint8_t>& from, const std::vector<uint8_t>& to,
-         uint32_t width, uint32_t height)
-      : PixelEffect(width, height), m_from(from), m_to(to)
+         uint32_t width, uint32_t height, uint32_t backgroundFrom = UINT32_MAX, uint32_t backgroundTo = UINT32_MAX)
+      : PixelEffect(width, height), m_from(from), m_to(to), m_backgroundFrom(backgroundFrom), m_backgroundTo(backgroundTo)
    {
       std::vector<uint32_t> a = litPlaces(from, width, height);
       std::vector<uint32_t> b = litPlaces(to, width, height);
@@ -1240,8 +1244,15 @@ protected:
    bool ready() const override { return !m_parts.empty(); }
    void build(std::vector<Rule>& cells, uint32_t step, uint32_t steps) const override
    {
+      // What a place shows when no pixel is on it: the background of the first frame, and from the
+      // halfway point that of the other one; black when a frame has no background.
+      const bool late = 2 * step >= steps;
+      const uint32_t bg = late ? m_backgroundTo : m_backgroundFrom;
+      Rule empty{false, 0, 0, false, true}; // black, whatever the other frame shows
+      if (bg != UINT32_MAX && bg < cells.size())
+         empty = Rule{true, bg % m_width, bg / m_width, late};
       for (Rule& r : cells)
-         r = Rule{false, 0, 0, false, true}; // black, whatever the other frame shows
+         r = empty;
       std::vector<int> rank(cells.size(), -1);
       const double t = static_cast<double>(step) / steps;
       for (const Part& p : m_parts)
@@ -1303,6 +1314,7 @@ private:
    }
 
    std::vector<uint8_t> m_from, m_to;
+   uint32_t m_backgroundFrom, m_backgroundTo;
    double m_end = 0;
    std::vector<Part> m_parts;
 };
@@ -1421,7 +1433,8 @@ inline std::unique_ptr<Effect> makeMorph(const char* option, const SourceInfo& s
                        : same(option, "down") ? Direction::Down : Direction::Right;
    if (!s.toFrame)
       return std::make_unique<Morph>(sweep, d, std::vector<uint8_t>(), std::vector<uint8_t>(), s.width, s.height);
-   return std::make_unique<Morph>(sweep, d, s.shades, s.shadesSecond, s.width, s.height);
+   return std::make_unique<Morph>(sweep, d, s.shades, s.shadesSecond, s.width, s.height, s.background,
+                                  s.backgroundSecond);
 }
 
 inline const Option kDissolveOptions[] = {

@@ -18,6 +18,7 @@
 
 #include "ColorizingDMDPlugin.h"
 #include "Preview.h"
+#include "Language.h"
 #include "Transitions.h"
 #include "Version.h"
 #include "plugins/MsgPlugin.h"
@@ -644,9 +645,25 @@ void fireEvent(const char* name)
          s.callback(id, s.userData, nullptr);
 }
 
+std::string g_language = "en"; // what the fake editor's GetLanguage says; empty: it does not know
+
+int MSGPIAPI fGetLanguage(char* code, uint32_t capacity)
+{
+   if (g_language.empty())
+      return 0;
+   const uint32_t size = static_cast<uint32_t>(g_language.size() + 1);
+   if (capacity >= size)
+      std::memcpy(code, g_language.c_str(), size);
+   return static_cast<int>(size);
+}
+
+int MSGPIAPI fIsDarkTheme() { return 1; }
+
 void setUpApi()
 {
-   g_api.version = 10;
+   g_api.version = 12;
+   g_api.GetLanguage = fGetLanguage;
+   g_api.IsDarkTheme = fIsDarkTheme;
    g_api.GetProjectInfo = fGetProjectInfo;
    g_api.GetFrameInfo = fGetFrameInfo;
    g_api.GetOriginalFrame = fGetOriginalFrame;
@@ -2513,6 +2530,20 @@ void testMorph()
       auto again = makeNamed("morph", order, w, h, true);
       CHECK(signatureOf(*e, w, h, most / 2, most) == signatureOf(*again, w, h, most / 2, most));
    }
+   // With a background place, the places without a pixel show it, not black: the first frame's
+   // before the halfway point, the other frame's after it.
+   {
+      transitions::SourceInfo bg = makeInfo(w, h);
+      bg.toFrame = true;
+      bg.background = 0;
+      bg.backgroundSecond = 5;
+      auto e = transitions::findTransition("morph")->make("random", bg);
+      const uint32_t most = e->maxSteps();
+      CHECK(most >= 8);
+      const transitions::Rule early = e->rule(w - 1, 0, 1, most), late = e->rule(w - 1, 0, most, most);
+      CHECK(early.visible && !early.second && early.x == 0 && early.y == 0);
+      CHECK(late.visible && late.second && late.x == 5 && late.y == 0);
+   }
    // Two pictures of different sizes of lit area: every lit pixel of the larger one is used.
    transitions::SourceInfo odd = makeInfo(129, 33);
    odd.toFrame = true;
@@ -2525,12 +2556,12 @@ void testMorphThroughTheWindow()
    {
       resetProject(128, 32, zones);
       g_frames[1] = makeSecondFrame(zones);
-      // Like a real colorization: black where the original is darkest, except that the author has
+      // Like a real colorization: a dark red background where the original is darkest, except that the author has
       // colored in rows that the original leaves black (green pixels in the top 8 rows of frame 0).
       for (Frame* f : {&g_frames[0], &g_frames[1]})
          for (size_t p = 0; p < f->original.size(); ++p)
             if (f->original[p] == 1)
-               f->sd[p] = 0;
+               f->sd[p] = 0x2000;
       for (uint32_t y = 0; y < 8; ++y)
          for (uint32_t x = 0; x < 128; x += 2)
             g_frames[0].sd[static_cast<size_t>(y) * 128 + x] = 0x07E0;
@@ -2559,11 +2590,12 @@ void testMorphThroughTheWindow()
          if (b.original[p] > 1)
             CHECK(last.original[p] == b.original[p] && last.sd[p] == b.sd[p]);
          else
-            CHECK(last.original[p] == 0 && last.sd[p] == 0);
+            CHECK(last.original[p] <= 1 && last.sd[p] == 0x2000); // the background stays, not black
       }
-      // On the way a frame is black between the pixels, and the starting frame is not changed.
+      // On the way the background stays between the pixels, and the starting frame is not changed.
       const Frame& mid = g_frames[3];
-      CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0) > static_cast<long>(mid.sd.size() / 3));
+      CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0x2000) > static_cast<long>(mid.sd.size() / 3));
+      CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0) == 0);
       CHECK(g_frames[0].original == start.original && g_frames[0].sd == start.sd);
       // The colored-in pixels that the original leaves black take part: the first new frame still
       // has green ones, and they are not left behind in the top rows of the last frame.
@@ -2576,6 +2608,96 @@ void testMorphThroughTheWindow()
       CHECK(green(g_frames[2], false) > 0);
       CHECK(green(last, false) == 0);
    }
+}
+
+// The window in the author's language: German and French follow the editor's language; an unknown
+// language, or an editor that cannot tell, gives English.
+void testLanguages()
+{
+   struct Language
+   {
+      const char* code;
+      const char* transitionLabel;
+      const char* black;
+   };
+   const Language languages[] = {{"en", "Transition", "Black"},
+                                 {"de", "Übergang", "Schwarz"},
+                                 {"fr", "Transition", "Noir"},
+                                 {"xx", "Transition", "Black"},
+                                 {"", "Transition", "Black"}};
+   for (const Language& l : languages)
+   {
+      const std::string code = l.code;
+      g_language = code;
+      TransitionFXPluginUnload();
+      setUpApi();
+      TransitionFXPluginLoad(1, &g_bus);
+      resetProject(128, 32, false);
+      openMenu();
+      const Form::Field* t = fieldOf("transition");
+      CHECK(t && t->label == l.transitionLabel);
+      const Form::Field* target = fieldOf("target");
+      CHECK(target && target->choices.find(std::string("black=") + l.black) != std::string::npos);
+      if (t && code == "de")
+         CHECK(t->choices.find("alternating_slide=Wechselnde Verschiebung") != std::string::npos);
+      if (t && code == "fr")
+         CHECK(t->choices.find("dust=Poussière") != std::string::npos);
+      // The description under the transition and the status bar follow.
+      change("transition", "fade");
+      const Form::Field* f = fieldOf("transition");
+      if (f && code == "de")
+         CHECK(f->help.find("überblendet") != std::string::npos);
+      if (f && code == "fr")
+         CHECK(f->help.find("progressivement") != std::string::npos);
+      if (f && (code == "en" || code == "xx" || code.empty()))
+         CHECK(f->help.find("gradually fades") != std::string::npos);
+      change("frames", "3");
+      closeForm(true);
+      CHECK(g_status.size() == 1);
+      if (!g_status.empty())
+      {
+         if (code == "de")
+            CHECK(g_status[0].find("hinzugefügt") != std::string::npos && g_status[0].find("Rückgängig") != std::string::npos);
+         else if (code == "fr")
+            CHECK(g_status[0].find("ajoutée(s)") != std::string::npos);
+         else
+            CHECK(g_status[0].find("added 3 frame(s)") != std::string::npos);
+         CHECK(g_status[0].find('%') == std::string::npos); // no placeholder is left over
+      }
+   }
+   // An editor before version 11 has no language: English.
+   g_language = "de";
+   TransitionFXPluginUnload();
+   setUpApi();
+   g_api.version = 10;
+   TransitionFXPluginLoad(1, &g_bus);
+   resetProject(128, 32, false);
+   openMenu();
+   CHECK(fieldOf("transition") && fieldOf("transition")->label == "Transition");
+   g_language = "en";
+   TransitionFXPluginUnload();
+   setUpApi();
+   TransitionFXPluginLoad(1, &g_bus);
+
+   // Every text of every transition has a German and a French translation.
+   auto translated = [](const char* text) {
+      const i18n::Entry* e = i18n::find(text);
+      return e && e->german && *e->german && e->french && *e->french;
+   };
+   for (const transitions::Transition& tr : transitions::kTransitions)
+   {
+      CHECK(translated(tr.label));
+      CHECK(translated(tr.description));
+      CHECK(!tr.optionLabel || translated(tr.optionLabel));
+      // A description is a sentence: it differs in another language.
+      const i18n::Entry* d = i18n::find(tr.description);
+      CHECK(d && std::string(d->german) != tr.description && std::string(d->french) != tr.description);
+      for (size_t i = 0; i < tr.optionCount; ++i)
+         CHECK(std::string(tr.options[i].label).find(" x ") != std::string::npos || translated(tr.options[i].label));
+   }
+   // And the reason that limits the frames of every transition.
+   for (const Case& c : allCases())
+      CHECK(translated(makeEffect(c, 128, 32)->limitReason()));
 }
 
 void testSecondMovesWindow()
@@ -2839,6 +2961,7 @@ int main()
    testMorph();
    testMorphThroughTheWindow();
    testSecondMovesWindow();
+   testLanguages();
    testVersionAndDescriptions();
    testCheckerboard();
    testGoingThroughBothFrames();

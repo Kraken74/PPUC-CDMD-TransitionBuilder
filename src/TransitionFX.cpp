@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "ColorizingDMDPlugin.h"
+#include "Language.h"
 #include "Preview.h"
 #include "Transitions.h"
 #include "Version.h"
@@ -193,21 +194,21 @@ std::string optionKey(const transitions::Transition& transition) { return std::s
 std::string describe(const transitions::Transition& transition, const transitions::Option* option,
                      const std::string& target)
 {
-   std::string what = transition.label;
+   std::string what = i18n::tr(transition.label);
    if (option)
-      what += std::string(" (") + option->label + ")";
-   return what + " to " + target;
+      what += std::string(" (") + i18n::tr(option->label) + ")";
+   return i18n::fmt("%1 to %2", {what, target});
 }
 
 // What the window's "Transition to" says now: "Black", "White" or "frame 12".
 std::string targetName()
 {
    if (g_window.toFrame)
-      return "frame " + std::to_string(g_window.second.frame) +
+      return i18n::fmt("frame %1", {std::to_string(g_window.second.frame)}) +
              (g_window.secondMoves && g_window.transition && g_window.transition->canMoveSecond
-                 ? ", moving in with it"
+                 ? i18n::tr(", moving in with it")
                  : "");
-   return g_window.toWhite ? "White" : "Black";
+   return i18n::tr(g_window.toWhite ? "White" : "Black");
 }
 
 // ---- Reading the frame ----------------------------------------------------------------------
@@ -218,21 +219,21 @@ std::string loadSource(uint32_t frame, Source& source)
    source = Source{};
    ColorizingDMDProjectInfo info{};
    if (!g_editor->GetProjectInfo(&info) || !info.hasProject)
-      return "Open a project first.";
+      return i18n::tr("Open a project first.");
    if (frame == CDMDPI_NONE || frame >= info.frameCount)
-      return "Select the frame to start the transition from first.";
+      return i18n::tr("Select the frame to start the transition from first.");
 
    source.frame = frame;
    source.colorCount = info.colorCount;
    if (!g_editor->GetFrameInfo(frame, &source.info))
-      return "The frame does not exist.";
+      return i18n::tr("The frame does not exist.");
 
    if (!fetch<uint8_t>(
           [&](uint8_t* p, uint32_t cap, uint32_t* w, uint32_t* h) {
              return g_editor->GetOriginalFrame(frame, p, cap, w, h);
           },
           source.original, source.originalWidth, source.originalHeight))
-      return "The editor could not give the original frame.";
+      return i18n::tr("The editor could not give the original frame.");
 
    for (int hd = 0; hd <= 1; ++hd)
    {
@@ -248,7 +249,7 @@ std::string loadSource(uint32_t frame, Source& source)
          source.planes.push_back(std::move(plane));
    }
    if (source.planes.empty())
-      return "The editor could not give the colorized frame.";
+      return i18n::tr("The editor could not give the colorized frame.");
 
    if (source.info.hasDynamicPixels)
    {
@@ -294,10 +295,13 @@ uint32_t crossSpanOf(const Source& a, const Source& b)
 }
 
 // The shades Dust and Morph move: the original frame's, and also the places where the original is
-// as dark as it gets but the colorized frame shows something (a colored pixel, or a dynamic zone):
-// an author can color in rows the original leaves black, and those pixels move too.
-std::vector<uint8_t> movingShades(const Source& source)
+// as dark as it gets but the colorized frame shows something other than its background (the
+// color most pixels have): an author can color in rows the original leaves black, and those
+// pixels move too, while a colored background stays where it is. `background` is set to a place
+// that shows the background (UINT32_MAX: none, every place has something on it).
+std::vector<uint8_t> movingShades(const Source& source, uint32_t& background)
 {
+   background = UINT32_MAX;
    std::vector<uint8_t> shades = source.original;
    const uint32_t w = source.originalWidth, h = source.originalHeight;
    if (shades.empty() || shades.size() != static_cast<size_t>(w) * h)
@@ -306,8 +310,17 @@ std::vector<uint8_t> movingShades(const Source& source)
    if (darkest == 255)
       return shades;
    const Plane* plane = source.planes.empty() ? nullptr : &source.planes[0];
-   if (plane && (plane->width == 0 || plane->height == 0 || plane->pixels.size() != static_cast<size_t>(plane->width) * plane->height))
+   if (plane && (plane->width == 0 || plane->height == 0 ||
+                 plane->pixels.size() != static_cast<size_t>(plane->width) * plane->height))
       plane = nullptr;
+   uint16_t backgroundColor = 0;
+   if (plane)
+   {
+      std::vector<uint32_t> count(65536, 0);
+      for (uint16_t pixel : plane->pixels)
+         ++count[pixel];
+      backgroundColor = static_cast<uint16_t>(std::max_element(count.begin(), count.end()) - count.begin());
+   }
    const bool zones = source.zonesWidth > 0 && source.zonesHeight > 0 &&
                       source.zones.size() == static_cast<size_t>(source.zonesWidth) * source.zonesHeight;
    for (uint32_t y = 0; y < h; ++y)
@@ -319,16 +332,20 @@ std::vector<uint8_t> movingShades(const Source& source)
          bool shown = false;
          if (plane)
          {
-            const size_t px = static_cast<size_t>(x) * plane->width / w, py = static_cast<size_t>(y) * plane->height / h;
-            shown = plane->pixels[py * plane->width + px] != 0;
+            const size_t px = static_cast<size_t>(x) * plane->width / w;
+            const size_t py = static_cast<size_t>(y) * plane->height / h;
+            shown = plane->pixels[py * plane->width + px] != backgroundColor;
          }
          if (!shown && zones)
          {
-            const size_t zx = static_cast<size_t>(x) * source.zonesWidth / w, zy = static_cast<size_t>(y) * source.zonesHeight / h;
+            const size_t zx = static_cast<size_t>(x) * source.zonesWidth / w;
+            const size_t zy = static_cast<size_t>(y) * source.zonesHeight / h;
             shown = source.zones[zy * source.zonesWidth + zx] != 255;
          }
          if (shown)
             shade = static_cast<uint8_t>(darkest + 1);
+         else if (background == UINT32_MAX)
+            background = y * w + x;
       }
    return shades;
 }
@@ -345,9 +362,9 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
-   info.shades = movingShades(source);
+   info.shades = movingShades(source, info.background);
    if (second)
-      info.shadesSecond = movingShades(*second);
+      info.shadesSecond = movingShades(*second, info.backgroundSecond);
    if (!source.original.empty())
    {
       info.brightestShade = *std::max_element(source.original.begin(), source.original.end());
@@ -448,13 +465,15 @@ void combine(const Source& a, const Source& b, Combined& out)
       taken[free] = true;
       target[set] = free;
       out.sets.emplace_back(free, colorsOf(b, set));
-      out.caveat += "Both frames use dynamic set " + std::to_string(set + 1) + " for different colors: frame " +
-                    std::to_string(b.frame) + "'s zones of that set use dynamic set " + std::to_string(free + 1) +
-                    " in the new frames.\n";
+      out.caveat += i18n::fmt("Both frames use dynamic set %1 for different colors: frame %2's zones of that set use "
+                              "dynamic set %3 in the new frames.",
+                              {std::to_string(set + 1), std::to_string(b.frame), std::to_string(free + 1)}) +
+                    "\n";
    }
    if (!lost.empty())
-      out.caveat += "No dynamic set was free for frame " + std::to_string(b.frame) + "'s set(s) " + lost +
-                    ": those zones are not in the new frames.\n";
+      out.caveat += i18n::fmt("No dynamic set was free for frame %1's set(s) %2: those zones are not in the new frames.",
+                              {std::to_string(b.frame), lost}) +
+                    "\n";
    for (uint8_t& set : out.zones2)
       if (set < CDMDPI_DYNAMIC_SETS)
          set = static_cast<uint8_t>(target[set]);
@@ -478,10 +497,10 @@ std::string chooseSecond(uint32_t current, uint32_t& second)
       if (frame != current)
          others.push_back(frame);
    if (others.empty())
-      return "Ctrl+click a second frame in the frame list: the frame you clicked last is the start, the "
-             "other selected frame the end.";
+      return i18n::tr("Ctrl+click a second frame in the frame list: the frame you clicked last is the start, the "
+                      "other selected frame the end.");
    if (others.size() > 1)
-      return "Select exactly two frames: the frame you clicked last is the start, the other one the end.";
+      return i18n::tr("Select exactly two frames: the frame you clicked last is the start, the other one the end.");
    second = others.front();
    return std::string();
 }
@@ -530,10 +549,10 @@ std::string createTransition(const Request& request, Result& result)
 
    // The window offers only numbers that work; this is the net under it.
    if (steps < 1 || steps > effect.maxSteps())
-      return "This transition can make at most " + std::to_string(effect.maxSteps()) +
-             " different frames from this frame.";
+      return i18n::fmt("This transition can make at most %1 different frames from this frame.",
+                       {std::to_string(effect.maxSteps())});
    if (scene && !g_window.scenesPossible)
-      return "Scenes need a project of 128 x 32 frames.";
+      return i18n::tr("Scenes need a project of 128 x 32 frames.");
    const bool toFrame = g_window.toFrame;
    if (toFrame && !g_window.secondProblem.empty())
       return g_window.secondProblem;
@@ -541,23 +560,27 @@ std::string createTransition(const Request& request, Result& result)
    const Combined& combined = g_window.combined;
 
    if (source.info.background != CDMDPI_NONE)
-      result.caveat += "The frame shows a background. Where the background shows through, the pixels "
-                       "stay as they are; only the frame's own pixels are changed by the transition.\n";
+      result.caveat += std::string(i18n::tr("The frame shows a background. Where the background shows through, the "
+                                            "pixels stay as they are; only the frame's own pixels are changed by the "
+                                            "transition.")) +
+                       "\n";
    if (toFrame && second.info.background != CDMDPI_NONE)
-      result.caveat += "Frame " + std::to_string(second.frame) + " shows a background; the new frames keep the "
-                       "background of frame " + std::to_string(source.frame) + ".\n";
+      result.caveat += i18n::fmt("Frame %1 shows a background; the new frames keep the background of frame %2.",
+                                 {std::to_string(second.frame), std::to_string(source.frame)}) +
+                       "\n";
    if (toFrame)
       result.caveat += combined.caveat;
    if (scene && source.info.triggerId >= 50000 && source.info.triggerId <= 61999)
-      result.caveat += "Frame " + std::to_string(source.frame) + " started scene " +
-                       std::to_string(source.info.triggerId) + " before; it now starts the new scene.\n";
+      result.caveat += i18n::fmt("Frame %1 started scene %2 before; it now starts the new scene.",
+                                 {std::to_string(source.frame), std::to_string(source.info.triggerId)}) +
+                       "\n";
 
    if (!g_editor->BeginEdit(g_endpoint, kUndoName))
-      return "The editor cannot start an edit right now (another edit is open).";
+      return i18n::tr("The editor cannot start an edit right now (another edit is open).");
 
    auto fail = [&](const std::string& why) {
       g_editor->EndEdit(g_endpoint, 0); // takes every change back
-      return why + " Nothing was changed.";
+      return why + " " + i18n::tr("Nothing was changed.");
    };
 
    const uint32_t ow = source.originalWidth, oh = source.originalHeight;
@@ -573,7 +596,7 @@ std::string createTransition(const Request& request, Result& result)
 
    for (uint32_t step = 1; step <= steps; ++step)
    {
-      const std::string which = "frame " + std::to_string(step) + " of " + std::to_string(steps);
+      const std::string which = i18n::fmt("frame %1 of %2", {std::to_string(step), std::to_string(steps)});
 
       // The original: the pixels taken away get the shade of black (0) or white (the brightest),
       // or the pixel of the other frame. A fade does not change the shades (a dynamic zone colors a pixel
@@ -592,13 +615,13 @@ std::string createTransition(const Request& request, Result& result)
       if (!g_editor->AddFrame(g_endpoint, stepOriginal.data(), static_cast<uint32_t>(stepOriginal.size()),
                               source.frame, &newFrame) ||
           newFrame == CDMDPI_NONE)
-         return fail("The editor refused to add " + which + ".");
+         return fail(i18n::fmt("The editor refused to add %1.", {which}));
       created.push_back(newFrame);
 
       // No comparison mask on the new frames (the source's mask came along with the copy). The
       // shape mode stays as it is.
       if (!g_editor->SetFrameComparison(g_endpoint, newFrame, CDMDPI_NONE, source.info.shapeMode))
-         return fail("The editor refused to clear the comparison mask of " + which + ".");
+         return fail(i18n::fmt("The editor refused to clear the comparison mask of %1.", {which}));
 
       // The colorized planes follow the same decisions as the original.
       for (size_t index = 0; index < source.planes.size(); ++index)
@@ -607,7 +630,7 @@ std::string createTransition(const Request& request, Result& result)
          drawPlane(plane, toFrame ? &second.planes[index] : nullptr, fillColor, effect, step, steps, stepPixels);
          if (!g_editor->SetFramePicture(g_endpoint, newFrame, plane.hd, stepPixels.data(), nullptr,
                                         static_cast<uint32_t>(stepPixels.size())))
-            return fail("The editor refused the picture of " + which + ".");
+            return fail(i18n::fmt("The editor refused the picture of %1.", {which}));
       }
 
       // Dynamic zones color a pixel at run time from its shade, so they move with the picture,
@@ -623,7 +646,7 @@ std::string createTransition(const Request& request, Result& result)
             preview::renderStep<uint8_t>(zones, stepZones, zw, zh, ow, oh, effect, step, steps, 255,
                                          [](uint8_t set) { return set; }, toFrame ? &combined.zones2 : nullptr);
          if (!g_editor->SetDynamicZones(g_endpoint, newFrame, stepZones.data(), static_cast<uint32_t>(stepZones.size())))
-            return fail("The editor refused the dynamic zones of " + which + ".");
+            return fail(i18n::fmt("The editor refused the dynamic zones of %1.", {which}));
       }
       if (toFrame)
       {
@@ -632,9 +655,9 @@ std::string createTransition(const Request& request, Result& result)
          for (const auto& entry : combined.sets)
             if (entry.second.size() == source.colorCount &&
                 !g_editor->SetDynamicColors(g_endpoint, newFrame, entry.first, entry.second.data(), source.colorCount))
-               return fail("The editor refused the dynamic colors of " + which + ".");
+               return fail(i18n::fmt("The editor refused the dynamic colors of %1.", {which}));
          if (!g_editor->ClearColorRotations(g_endpoint, newFrame))
-            return fail("The editor refused to clear the color rotations of " + which + ".");
+            return fail(i18n::fmt("The editor refused to clear the color rotations of %1.", {which}));
       }
 
       if (effect.changesColors())
@@ -647,11 +670,11 @@ std::string createTransition(const Request& request, Result& result)
                   stepColors[shade] =
                      effect.color(source.dynamicColors[static_cast<size_t>(set) * source.colorCount + shade], step, steps);
                if (!g_editor->SetDynamicColors(g_endpoint, newFrame, set, stepColors.data(), source.colorCount))
-                  return fail("The editor refused the dynamic colors of " + which + ".");
+                  return fail(i18n::fmt("The editor refused the dynamic colors of %1.", {which}));
             }
          // A color rotation would keep turning the frame's colors at full brightness.
          if (!g_editor->ClearColorRotations(g_endpoint, newFrame))
-            return fail("The editor refused to clear the color rotations of " + which + ".");
+            return fail(i18n::fmt("The editor refused to clear the color rotations of %1.", {which}));
       }
    }
 
@@ -672,11 +695,11 @@ std::string createTransition(const Request& request, Result& result)
       if (!g_editor->CreateScene(g_endpoint, &definition, created.data(), static_cast<uint32_t>(created.size()),
                                  &sceneId, &first) ||
           sceneId == CDMDPI_NONE || first == CDMDPI_NONE)
-         return fail("The editor refused to make the scene.");
+         return fail(i18n::tr("The editor refused to make the scene."));
       if (!g_editor->SetFrameScene(g_endpoint, source.frame, sceneId))
-         return fail("The editor refused to let frame " + std::to_string(source.frame) + " start the scene.");
+         return fail(i18n::fmt("The editor refused to let frame %1 start the scene.", {std::to_string(source.frame)}));
       if (!g_editor->DeleteFrames(g_endpoint, created.data(), static_cast<uint32_t>(created.size())))
-         return fail("The editor refused to delete the frames the scene was made from.");
+         return fail(i18n::tr("The editor refused to delete the frames the scene was made from."));
       first -= static_cast<uint32_t>(created.size());
       for (uint32_t i = 0; i < created.size(); ++i)
          created[i] = first + i;
@@ -686,7 +709,7 @@ std::string createTransition(const Request& request, Result& result)
       if (created.front() != source.frame + 1)
       {
          if (!g_editor->MoveFrames(g_endpoint, created.data(), static_cast<uint32_t>(created.size()), source.frame + 1))
-            return fail("The editor refused to move the scene's frames behind the starting frame.");
+            return fail(i18n::tr("The editor refused to move the scene's frames behind the starting frame."));
          for (uint32_t i = 0; i < created.size(); ++i)
             created[i] = source.frame + 1 + i;
       }
@@ -696,15 +719,15 @@ std::string createTransition(const Request& request, Result& result)
    else if (request.placement == "after" && created.front() != source.frame + 1)
    {
       if (!g_editor->MoveFrames(g_endpoint, created.data(), static_cast<uint32_t>(created.size()), source.frame + 1))
-         return fail("The editor refused to move the new frames behind the starting frame.");
+         return fail(i18n::tr("The editor refused to move the new frames behind the starting frame."));
       for (uint32_t i = 0; i < created.size(); ++i)
          created[i] = source.frame + 1 + i; // where they are now, in their order
    }
 
    if (!g_editor->EndEdit(g_endpoint, 1))
-      return "The editor did not record the new frames. In a team project a partner is probably working on "
-             "the frame order or on this frame: the status bar names who, for a few seconds. Merge the partners' changes first, or ask them. "
-             "Nothing was changed.";
+      return i18n::tr("The editor did not record the new frames. In a team project a partner is probably working on "
+                      "the frame order or on this frame: the status bar names who, for a few seconds. Merge the "
+                      "partners' changes first, or ask them. Nothing was changed.");
 
    // The current frame and the selection stay as they are (no ShowFrames): the editor's Undo
    // takes the new frames back, and the author is where they were before.
@@ -734,16 +757,17 @@ std::string optionChoices(const transitions::Transition& transition)
    {
       if (i > 0)
          choices += '\n';
-      choices += std::string(transition.options[i].id) + "=" + transition.options[i].label;
+      choices += std::string(transition.options[i].id) + "=" + i18n::tr(transition.options[i].label);
    }
    return choices;
 }
 
 std::string placementChoices(bool scenes)
 {
-   std::string choices = "after=Immediately after the starting frame\nend=At the end of the project";
+   std::string choices = std::string("after=") + i18n::tr("Immediately after the starting frame") + "\nend=" +
+                         i18n::tr("At the end of the project");
    if (scenes)
-      choices += "\nscene=As a scene that the starting frame starts";
+      choices += std::string("\nscene=") + i18n::tr("As a scene that the starting frame starts");
    return choices;
 }
 
@@ -788,8 +812,9 @@ void loadSecond()
       same = a.zonesWidth == b.zonesWidth && a.zonesHeight == b.zonesHeight;
    if (!same)
    {
-      g_window.secondProblem = "Frame " + std::to_string(b.frame) + " is not made like frame " + std::to_string(a.frame) +
-                               " (another size, or only one of them has an HD picture).";
+      g_window.secondProblem = i18n::fmt("Frame %1 is not made like frame %2 (another size, or only one of them has "
+                                         "an HD picture).",
+                                         {std::to_string(b.frame), std::to_string(a.frame)});
       return;
    }
    combine(a, b, g_window.combined);
@@ -803,9 +828,9 @@ std::string framesChoices()
 {
    const uint32_t most = mostFrames();
    if (g_window.toFrame && !g_window.secondProblem.empty())
-      return "0=None (select the second frame first)";
+      return std::string("0=") + i18n::tr("None (select the second frame first)");
    if (most < 1)
-      return "0=None (this transition can do nothing with this frame)";
+      return std::string("0=") + i18n::tr("None (this transition can do nothing with this frame)");
    std::string choices;
    for (uint32_t n = 1; n <= most; ++n)
    {
@@ -823,11 +848,12 @@ std::string framesHelp()
    if (!g_window.effect)
       return std::string();
    if (mostFrames() < 1)
-      return "This transition can do nothing with this frame (" + std::string(g_window.effect->limitReason()) +
-             "). For a fade this means the picture is already all black, or all white" +
-             (g_window.toFrame ? ", or the two frames hardly differ." : ".");
-   return "Up to " + std::to_string(mostFrames()) + " different frames are possible from this frame (" +
-          g_window.effect->limitReason() + ").";
+      return i18n::fmt("This transition can do nothing with this frame (%1). For a fade this means the picture is "
+                       "already all black, or all white%2",
+                       {i18n::tr(g_window.effect->limitReason()),
+                        i18n::tr(g_window.toFrame ? ", or the two frames hardly differ." : ".")});
+   return i18n::fmt("Up to %1 different frames are possible from this frame (%2).",
+                    {std::to_string(mostFrames()), i18n::tr(g_window.effect->limitReason())});
 }
 
 // The number of frames to open the list on: the one asked for, within what works here.
@@ -846,12 +872,13 @@ std::string sourceNote()
       return g_window.sourceProblem;
    if (g_window.toFrame)
       return g_window.secondProblem.empty()
-                ? "From frame " + std::to_string(g_window.source.frame) + " to frame " +
-                     std::to_string(g_window.second.frame) +
-                     ". The frame you clicked last is the start, the other selected frame the end."
-                : "Starting from frame " + std::to_string(g_window.source.frame) + ". " + g_window.secondProblem;
-   return "Starting from frame " + std::to_string(g_window.source.frame) +
-          ". Click another frame in the frame list to start from that one.";
+                ? i18n::fmt("From frame %1 to frame %2. The frame you clicked last is the start, the other selected "
+                            "frame the end.",
+                            {std::to_string(g_window.source.frame), std::to_string(g_window.second.frame)})
+                : i18n::fmt("Starting from frame %1.", {std::to_string(g_window.source.frame)}) + " " +
+                     g_window.secondProblem;
+   return i18n::fmt("Starting from frame %1. Click another frame in the frame list to start from that one.",
+                    {std::to_string(g_window.source.frame)});
 }
 
 // The preview: a few steps of the transition, drawn from the source frame's first colorized
@@ -933,7 +960,7 @@ PreviewPictures makePreview(uint32_t steps)
       const uint32_t step = shown[i];
       drawPlane(plane, g_window.toFrame ? &secondPlane : nullptr, fillColor, effect, step, steps,
                 out.pixels[i]);
-      out.captions[i] = "Frame " + std::to_string(step) + " of " + std::to_string(steps);
+      out.captions[i] = i18n::fmt("Frame %1 of %2", {std::to_string(step), std::to_string(steps)});
    }
    // The images point into the pixels and captions, which are complete now.
    for (size_t i = 0; i < shown.size(); ++i)
@@ -974,7 +1001,7 @@ void updateFrames()
 void showDescription(const transitions::Transition& transition)
 {
    ColorizingDMDFormFieldUpdate change = changeOf(CDMDPI_FORM_SET_HELP);
-   change.help = transition.description;
+   change.help = i18n::tr(transition.description);
    update(kFieldTransition, change);
 }
 
@@ -998,7 +1025,7 @@ void updateOption()
    ColorizingDMDFormFieldUpdate change =
       changeOf(CDMDPI_FORM_SET_VISIBLE | CDMDPI_FORM_SET_LABEL | CDMDPI_FORM_SET_CHOICES | CDMDPI_FORM_SET_VALUE);
    change.visible = 1;
-   change.label = transition.optionLabel;
+   change.label = i18n::tr(transition.optionLabel);
    change.choices = choices.c_str();
    change.value = g_window.option->id;
    update(kFieldOption, change);
@@ -1119,7 +1146,7 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    g_window.transition = transitions::findTransition(formValue(kFieldTransition, "").c_str());
    if (!g_window.transition)
    {
-      message(kTitle, "Please choose a transition from the list.");
+      message(kTitle, i18n::tr("Please choose a transition from the list."));
       return;
    }
    g_window.option = transitions::findOption(*g_window.transition, formValue(kFieldOption, "").c_str());
@@ -1130,8 +1157,9 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    const std::string what = describe(*g_window.transition, g_window.option, targetName());
    if (mostFrames() < 1)
    {
-      message(kTitle, what + " can do nothing with this frame (" + g_window.effect->limitReason() +
-                         "). For a fade this means the picture is already all black, or all white.");
+      message(kTitle, i18n::fmt("%1 can do nothing with this frame (%2). For a fade this means the picture is "
+                                "already all black, or all white.",
+                                {what, i18n::tr(g_window.effect->limitReason())}));
       return;
    }
 
@@ -1141,7 +1169,7 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
    const long frames = std::strtol(framesText.c_str(), &end, 10);
    if (framesText.empty() || *end != '\0' || frames < 1)
    {
-      message(kTitle, "Please choose the number of frames from the list.");
+      message(kTitle, i18n::tr("Please choose the number of frames from the list."));
       return;
    }
    request.steps = static_cast<uint32_t>(frames);
@@ -1152,7 +1180,7 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
       const long duration = std::strtol(durationText.c_str(), &end, 10);
       if (durationText.empty() || *end != '\0' || duration < 1 || duration > 65535)
       {
-         message(kTitle, "The frame duration of the scene is a number of milliseconds from 1 to 65535.");
+         message(kTitle, i18n::tr("The frame duration of the scene is a number of milliseconds from 1 to 65535."));
          return;
       }
       request.sceneDurationMs = static_cast<uint32_t>(duration);
@@ -1166,14 +1194,17 @@ void MSGPIAPI onWindowClosed(void* /*userData*/, uint32_t result)
       return;
    }
 
-   std::string status = std::string(kTitle) + ": added " + std::to_string(frames) + " frame(s) of " + what;
+   const std::string first = std::to_string(made.shown.front()), last = std::to_string(made.shown.back());
+   std::string status;
    if (made.sceneId != CDMDPI_NONE)
-      status += " as scene " + std::to_string(made.sceneId) + " (frames " + std::to_string(made.shown.front()) +
-                " to " + std::to_string(made.shown.back()) + "), started by frame " +
-                std::to_string(g_window.source.frame);
+      status = i18n::fmt("TransitionFX: added %1 frame(s) of %2 as scene %3 (frames %4 to %5), started by frame %6. "
+                         "Undo takes them back.",
+                         {std::to_string(frames), what, std::to_string(made.sceneId), first, last,
+                          std::to_string(g_window.source.frame)});
    else
-      status += ", as frames " + std::to_string(made.shown.front()) + " to " + std::to_string(made.shown.back());
-   g_editor->ShowStatus(g_endpoint, (status + ". Undo takes them back.").c_str());
+      status = i18n::fmt("TransitionFX: added %1 frame(s) of %2, as frames %3 to %4. Undo takes them back.",
+                         {std::to_string(frames), what, first, last});
+   g_editor->ShowStatus(g_endpoint, status.c_str());
    if (!made.caveat.empty())
       message(kTitle, made.caveat);
 }
@@ -1208,7 +1239,7 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
    {
       if (!transitionChoices.empty())
          transitionChoices += '\n';
-      transitionChoices += std::string(entry.id) + "=" + entry.label;
+      transitionChoices += std::string(entry.id) + "=" + i18n::tr(entry.label);
    }
    const std::string note = sourceNote();
    const std::string options = transition.optionCount ? optionChoices(transition) : "-";
@@ -1226,47 +1257,50 @@ void MSGPIAPI onMenuEntry(void* /*userData*/)
       duration = std::to_string(g_window.source.info.durationMs ? g_window.source.info.durationMs : 33);
    const PreviewPictures pictures = makePreview(static_cast<uint32_t>(std::strtol(framesStart.c_str(), nullptr, 10)));
 
+   const std::string targets = std::string("black=") + i18n::tr("Black") + "\nwhite=" + i18n::tr("White") +
+                               "\nframe=" + i18n::tr("Another frame");
+   const std::string motions = std::string("still=") + i18n::tr("Stays in place, revealed") + "\nmoves=" +
+                               i18n::tr("Moves in with the effect");
    const ColorizingDMDFormField fields[] = {
       {kFieldSource, note.c_str(), CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTransition, "Transition", CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(),
-       transition.description, 0, nullptr, 0},
+      {kFieldTransition, i18n::tr("Transition"), CDMDPI_FIELD_RADIO, transition.id, transitionChoices.c_str(),
+       i18n::tr(transition.description), 0, nullptr, 0},
       {kFieldGap, kGap, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
-      {kFieldOption, transition.optionLabel ? transition.optionLabel : "Option", CDMDPI_FIELD_RADIO,
+      {kFieldOption, i18n::tr(transition.optionLabel ? transition.optionLabel : "Option"), CDMDPI_FIELD_RADIO,
        optionValue.c_str(), options.c_str(), nullptr, transition.optionCount ? 0u : CDMDPI_FORM_HIDDEN,
        nullptr, 0},
       {"sep1", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldTarget, "Transition to", CDMDPI_FIELD_RADIO,
-       g_window.toFrame ? "frame" : (g_window.toWhite ? "white" : "black"),
-       "black=Black\nwhite=White\nframe=Another frame", nullptr, 0, nullptr, 0},
-      {kFieldMotion, "Second frame", CDMDPI_FIELD_RADIO, g_window.secondMoves ? "moves" : "still",
-       "still=Stays in place, revealed\nmoves=Moves in with the effect",
-       "Stays in place: the second frame is not moved, the effect uncovers it. Moves in with the effect: the "
-       "second frame follows the first one in, in the same pattern (a slide pushes it in, a melt lets it "
-       "drip in from the top ...).",
+      {kFieldTarget, i18n::tr("Transition to"), CDMDPI_FIELD_RADIO,
+       g_window.toFrame ? "frame" : (g_window.toWhite ? "white" : "black"), targets.c_str(), nullptr, 0, nullptr, 0},
+      {kFieldMotion, i18n::tr("Second frame"), CDMDPI_FIELD_RADIO, g_window.secondMoves ? "moves" : "still",
+       motions.c_str(),
+       i18n::tr("Stays in place: the second frame is not moved, the effect uncovers it. Moves in with the effect: the "
+                "second frame follows the first one in, in the same pattern (a slide pushes it in, a melt lets it "
+                "drip in from the top ...)."),
        g_window.toFrame && transition.canMoveSecond ? 0u : CDMDPI_FORM_HIDDEN, nullptr, 0},
       {"sep2", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldFrames, "Number of frames", CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
+      {kFieldFrames, i18n::tr("Number of frames"), CDMDPI_FIELD_CHOICE, framesStart.c_str(), frames.c_str(), help.c_str(), 0,
        nullptr, 0},
       {"sep3", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldPlacement, "Place the new frames", CDMDPI_FIELD_RADIO, placement.c_str(), placements.c_str(),
-       "A scene is made of the new frames, and the starting frame starts it. Scenes need a project of "
-       "128 x 32 frames.",
+      {kFieldPlacement, i18n::tr("Place the new frames"), CDMDPI_FIELD_RADIO, placement.c_str(), placements.c_str(),
+       i18n::tr("A scene is made of the new frames, and the starting frame starts it. Scenes need a project of "
+                "128 x 32 frames."),
        0, nullptr, 0},
-      {kFieldDuration, "Frame duration of the scene (ms)", CDMDPI_FIELD_TEXT, duration.c_str(), nullptr,
-       "How long each frame of the scene shows. The other settings of the scene are the editor's defaults; "
-       "change them in the Scenes section.",
+      {kFieldDuration, i18n::tr("Frame duration of the scene (ms)"), CDMDPI_FIELD_TEXT, duration.c_str(), nullptr,
+       i18n::tr("How long each frame of the scene shows. The other settings of the scene are the editor's defaults; "
+                "change them in the Scenes section."),
        placement == "scene" ? 0u : CDMDPI_FORM_HIDDEN, nullptr, 0},
       {"sep4", kSeparator, CDMDPI_FIELD_NOTE, nullptr, nullptr, nullptr, 0, nullptr, 0},
-      {kFieldPreview, "Preview", CDMDPI_FIELD_IMAGE, nullptr, nullptr, nullptr,
+      {kFieldPreview, i18n::tr("Preview"), CDMDPI_FIELD_IMAGE, nullptr, nullptr, nullptr,
        pictures.images.empty() ? CDMDPI_FORM_HIDDEN : 0u, pictures.images.data(),
        static_cast<uint32_t>(pictures.images.size())},
    };
-   if (!g_editor->ShowLiveForm(g_endpoint, kWindowTitle.c_str(), "Apply", nullptr, 0, fields,
+   if (!g_editor->ShowLiveForm(g_endpoint, kWindowTitle.c_str(), i18n::tr("Apply"), nullptr, 0, fields,
                                static_cast<uint32_t>(sizeof(fields) / sizeof(fields[0])), onFieldChanged,
                                onWindowClosed, nullptr))
    {
-      message(kTitle, "The window could not be opened. Close other plugin windows and try again.");
+      message(kTitle, i18n::tr("The window could not be opened. Close other plugin windows and try again."));
       return;
    }
    g_window.open = true;
@@ -1298,6 +1332,12 @@ MSGPI_EXPORT void MSGPIAPI TransitionFXPluginLoad(const uint32_t endpointId, con
       return;
    }
    g_editor = editor;
+   // The language of the editor's menus (editor API version 11); English with an older editor.
+   char language[16] = "";
+   if (editor->version >= 11 && editor->GetLanguage && editor->GetLanguage(language, sizeof(language)) > 0)
+      i18n::setLanguage(language);
+   else
+      i18n::setLanguage("en");
    g_selectionChangedId = g_msg->GetMsgID(CDMDPI_NAMESPACE, CDMDPI_EVT_ON_SELECTION_CHANGED);
    g_projectChangedId = g_msg->GetMsgID(CDMDPI_NAMESPACE, CDMDPI_EVT_ON_PROJECT_CHANGED);
    g_msg->SubscribeMsg(g_endpoint, g_selectionChangedId, onEditorEvent, nullptr);

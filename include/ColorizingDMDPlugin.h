@@ -1,11 +1,12 @@
 // license:GPLv3+
 //
-// ColorizingDMD editor API for plugins, version 10 (version 9 without radio buttons, version 8
-// without live forms and scenes either, version 7 without Create HD, deleting frames and sections either, version 6 without
-// CopyFrameSettings either, version 5 without AddFrame, MoveFrames and EndEdit's refusal
-// either, version 4 without identification and the runtime either, version 3 without ShowForm
-// and the file, note and consent fields either, version 2 without the pictures and the
-// author's windows either, version 1 without the editing part either).
+// ColorizingDMD editor API for plugins, version 12 (version 11 without the editor's actions,
+// version 10 without the language and the theme either, version 9 without radio buttons either,
+// version 8 without live forms and scenes either, version 7 without Create HD, deleting frames and
+// sections either, version 6 without CopyFrameSettings either, version 5 without AddFrame,
+// MoveFrames and EndEdit's refusal either, version 4 without identification and the runtime either,
+// version 3 without ShowForm and the file, note and consent fields either, version 2 without the
+// pictures and the author's windows either, version 1 without the editing part either).
 //
 // The editor hosts plugins on the VPX plugin bus (libvpxhost, the plugin SDK's MsgPlugin.h).
 // A plugin in the editor's plugin folder, enabled under Settings -> Plugins, is loaded at the
@@ -288,7 +289,7 @@ typedef struct ColorizingDMDScene
 
 typedef struct ColorizingDMDEditorAPI
 {
-   int version; // 9
+   int version; // 12
 
    // ---- The project ----------------------------------------------------------------------
    // Returns 0 when no project is open.
@@ -585,5 +586,47 @@ typedef struct ColorizingDMDEditorAPI
    // .triggerId); CDMDPI_NONE for none. Its PUP trigger and monochrome trigger stay. Refused for
    // a frame of a scene and for a scene the project does not have.
    int(MSGPIAPI* SetFrameScene)(uint32_t endpointId, uint32_t frame, uint32_t scene);
+
+   // ---- The author's language and theme (version 11) --------------------------------------
+   // For a plugin that brings its own texts in several languages and draws its own icons or
+   // colors. It treats an unknown language as English, and checks `version` first, so that
+   // editors before version 11 keep working.
+   //
+   // The language the editor's menus are shown in, as a lower case ISO 639-1 code into `code`
+   // (at most `capacity` bytes with the NUL): "en", "de" or "fr" today, more when the editor
+   // gets more. This is the language in effect, not the setting "Follow the system"; a change
+   // in the settings applies from the next start, so it does not change while a plugin is
+   // loaded. Returns the size of the code with the NUL, the code filled in when it fits (a first
+   // call with capacity 0 asks for the size), or 0 when it is not known (then English).
+   int(MSGPIAPI* GetLanguage)(char* code, uint32_t capacity);
+   // 1 while the editor shows its dark theme, else 0 (Settings -> Appearance -> Theme, with
+   // "Follow the system" resolved). It can change while a plugin is loaded.
+   int(MSGPIAPI* IsDarkTheme)();
+
+   // ---- The editor's own actions (version 12) ----------------------------------------------
+   // A plugin runs a function of the editor instead of rebuilding it: on the frame shown, its
+   // selected frames and the pixel selection of the canvas, with the draw color and the dynamic
+   // set the author chose, as one undo step of the editor's (Undo shows the action's name).
+   // The actions are named by the ids of the keyboard shortcut settings. These are supported;
+   // the list only grows:
+   //
+   //   copy, select-all, select-none, invert-selection, undo-selection, redo-selection,
+   //   selection-from-background-mask, mirror-selection-horizontally,
+   //   mirror-selection-vertically, black-original-to-black, remove-dynamic-zones,
+   //   assign-dynamic-set, dynamic-to-static,
+   //   shadow-<direction> and grow-<direction> (Edit -> Shadow Next To Selection and Grow
+   //   Selection), <direction> one of all-around, all-around-stern-style, left, bottom-left,
+   //   bottom, bottom-right, right, top-right, top, top-left.
+   //
+   // None of them opens a window. An action that needs a selection and finds none says so in
+   // the status bar and changes nothing, as from the menu; GetProjectInfo's revision tells
+   // whether the project changed.
+   //
+   // Runs the action as if the author chose it from the menu. Returns 1 when it ran, 0 for an
+   // id not supported, an action not enabled now (no project open, the Runtime view on ...) and
+   // while the plugin has an edit batch open (BeginEdit), which the action must not cut into.
+   int(MSGPIAPI* RunEditorAction)(uint32_t endpointId, const char* actionId);
+   // 1 when RunEditorAction would run the action now (a plugin grays its own buttons with it).
+   int(MSGPIAPI* IsEditorActionEnabled)(const char* actionId);
 
 } ColorizingDMDEditorAPI;
