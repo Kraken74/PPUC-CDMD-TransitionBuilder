@@ -2525,6 +2525,19 @@ void testMorphThroughTheWindow()
    {
       resetProject(128, 32, zones);
       g_frames[1] = makeSecondFrame(zones);
+      // Like a real colorization: black where the original is darkest, except that the author has
+      // colored in rows that the original leaves black (green pixels in the top 8 rows of frame 0).
+      for (Frame* f : {&g_frames[0], &g_frames[1]})
+         for (size_t p = 0; p < f->original.size(); ++p)
+            if (f->original[p] == 1)
+               f->sd[p] = 0;
+      for (uint32_t y = 0; y < 8; ++y)
+         for (uint32_t x = 0; x < 128; x += 2)
+            g_frames[0].sd[static_cast<size_t>(y) * 128 + x] = 0x07E0;
+      if (zones)
+         for (Frame* f : {&g_frames[0], &g_frames[1]})
+            std::fill(f->zones.begin(), f->zones.end(), 255);
+      const Frame start = g_frames[0];
       selectTwo(0, 1);
       openMenu();
       // Without another frame the window says so.
@@ -2551,7 +2564,17 @@ void testMorphThroughTheWindow()
       // On the way a frame is black between the pixels, and the starting frame is not changed.
       const Frame& mid = g_frames[3];
       CHECK(std::count(mid.sd.begin(), mid.sd.end(), 0) > static_cast<long>(mid.sd.size() / 3));
-      CHECK(g_frames[0].original == makeSourceFrame(zones).original);
+      CHECK(g_frames[0].original == start.original && g_frames[0].sd == start.sd);
+      // The colored-in pixels that the original leaves black take part: the first new frame still
+      // has green ones, and they are not left behind in the top rows of the last frame.
+      auto green = [](const Frame& f, bool topOnly) {
+         size_t n = 0;
+         for (size_t p = 0; p < f.sd.size() && (!topOnly || p < 8 * 128); ++p)
+            n += f.sd[p] == 0x07E0 ? 1 : 0;
+         return n;
+      };
+      CHECK(green(g_frames[2], false) > 0);
+      CHECK(green(last, false) == 0);
    }
 }
 

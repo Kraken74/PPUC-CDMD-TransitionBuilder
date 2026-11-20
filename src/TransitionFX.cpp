@@ -293,6 +293,46 @@ uint32_t crossSpanOf(const Source& a, const Source& b)
    return span;
 }
 
+// The shades Dust and Morph move: the original frame's, and also the places where the original is
+// as dark as it gets but the colorized frame shows something (a colored pixel, or a dynamic zone):
+// an author can color in rows the original leaves black, and those pixels move too.
+std::vector<uint8_t> movingShades(const Source& source)
+{
+   std::vector<uint8_t> shades = source.original;
+   const uint32_t w = source.originalWidth, h = source.originalHeight;
+   if (shades.empty() || shades.size() != static_cast<size_t>(w) * h)
+      return shades;
+   const uint8_t darkest = *std::min_element(shades.begin(), shades.end());
+   if (darkest == 255)
+      return shades;
+   const Plane* plane = source.planes.empty() ? nullptr : &source.planes[0];
+   if (plane && (plane->width == 0 || plane->height == 0 || plane->pixels.size() != static_cast<size_t>(plane->width) * plane->height))
+      plane = nullptr;
+   const bool zones = source.zonesWidth > 0 && source.zonesHeight > 0 &&
+                      source.zones.size() == static_cast<size_t>(source.zonesWidth) * source.zonesHeight;
+   for (uint32_t y = 0; y < h; ++y)
+      for (uint32_t x = 0; x < w; ++x)
+      {
+         uint8_t& shade = shades[static_cast<size_t>(y) * w + x];
+         if (shade > darkest)
+            continue;
+         bool shown = false;
+         if (plane)
+         {
+            const size_t px = static_cast<size_t>(x) * plane->width / w, py = static_cast<size_t>(y) * plane->height / h;
+            shown = plane->pixels[py * plane->width + px] != 0;
+         }
+         if (!shown && zones)
+         {
+            const size_t zx = static_cast<size_t>(x) * source.zonesWidth / w, zy = static_cast<size_t>(y) * source.zonesHeight / h;
+            shown = source.zones[zy * source.zonesWidth + zx] != 255;
+         }
+         if (shown)
+            shade = static_cast<uint8_t>(darkest + 1);
+      }
+   return shades;
+}
+
 transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const Source* second = nullptr)
 {
    transitions::SourceInfo info;
@@ -305,9 +345,9 @@ transitions::SourceInfo sourceInfoOf(const Source& source, bool toWhite, const S
    info.width = source.originalWidth;
    info.height = source.originalHeight;
    info.colorCount = source.colorCount;
-   info.shades = source.original;
+   info.shades = movingShades(source);
    if (second)
-      info.shadesSecond = second->original;
+      info.shadesSecond = movingShades(*second);
    if (!source.original.empty())
    {
       info.brightestShade = *std::max_element(source.original.begin(), source.original.end());

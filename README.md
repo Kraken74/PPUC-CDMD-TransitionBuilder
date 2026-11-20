@@ -144,7 +144,8 @@ and the window follows when you select other frames. The preview shows your two 
   arrive at the speed of the same row or column of the start frame (a melt lets it drip in from the
   top). The choice is only shown for those transitions.
 - **Morph** only works going to another frame (without one it offers no frames). Its pixels are
-  the ones brighter than the darkest shade of each frame; each of them is paired with a pixel of
+  the ones brighter than the darkest shade of each frame, plus the pixels you colored in where the
+  original is black (a colorized pixel that is not black, or in a dynamic zone, counts too); each of them is paired with a pixel of
   the other frame so that they hardly cross, and changes to the new pixel's color halfway. The
   background is black, whatever the other frame shows. Dust does not need another frame: to black
   or white it leaves that color behind, to another frame it uncovers it.
