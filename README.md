@@ -94,7 +94,7 @@ All of it, frames and scene, is one step of the editor's history.
 1. Get the plugin folder `TransitionFX` (see "Getting the plugin" below). It contains
    `plugin.cfg` and the plugin libraries: `plugin-transitionfx64.dll` (Windows x64),
    `plugin-transitionfx.dll` (Windows x86), `plugin-transitionfx.so` (Linux x64 and aarch64) and
-   `plugin-transitionfx.dylib` (macOS arm64). The folder from the `TransitionFX-all-platforms_v101`
+   `plugin-transitionfx.dylib` (macOS arm64). The folder from the `TransitionFX-all-platforms_v1.01`
    download holds all of them; the editor loads the one that fits the computer.
 2. In the editor, open `Settings -> Plugins` and click `Open Folder`. Put the whole
    `TransitionFX` folder into that folder (on Windows usually
@@ -118,8 +118,8 @@ GitHub builds it for you, for Windows (x64 and x86), Linux (x64 and aarch64) and
 
 1. Open the repository's `Actions` tab. The `Build plugin` run starts by itself after a push (or
    choose it and click `Run workflow`).
-2. When the run is green, open it and download `TransitionFX-all-platforms_v101` (the version is in the name) under `Artifacts`
-   (or the one for your platform, such as `TransitionFX-windows-x64_v101`). Unpack it: it holds the
+2. When the run is green, open it and download `TransitionFX-all-platforms_v1.01` (the version is in the name) under `Artifacts`
+   (or the one for your platform, such as `TransitionFX-windows-x64_v1.01`). Unpack it: it holds the
    `TransitionFX` folder from the steps above.
 
 Every platform build also runs the tests. They come after the upload, so a failing test never
@@ -255,6 +255,6 @@ have both.
 
 ## Version
 
-The window's title shows the version (`TransitionFX v1.01`), and the files the build makes carry it (`TransitionFX-windows-x64_v101`). It is `kVersion` in `src/Version.h`;
+The window's title shows the version (`TransitionFX v1.01`), and the files the build makes carry it (`TransitionFX-windows-x64_v1.01`). It is `kVersion` in `src/Version.h`;
 raise it by 0.01 with every update merged into the main branch, and keep `version` in `plugin.cfg`
 the same.
